@@ -18,7 +18,7 @@ from IPython.display import FileLink, display # Image not used directly
 import torch
 import time
 import pygame # Added for rendering in TetrisEnv
-
+from stable_baselines3 import PPO
 # --- Wandb Setup ---
 import os
 import wandb
@@ -529,27 +529,27 @@ gradient_steps = 1 # Default for DQN
 exploration_fraction = run.config["exploration_fraction"] if run else 0.1 # Default DQN explore fraction is smaller
 exploration_final_eps = run.config["exploration_final_eps"] if run else 0.05
 
-# Define DQN model
-model = DQN(
-    policy=policy_type,
-    env=train_env,
+# --- 建立 PPO 模型 ---
+model = PPO(
+    policy=policy_type,                # CnnPolicy
+    env=train_env,                     # VecFrameStack + Normalize 環境
     verbose=1,
     gamma=gamma,
     learning_rate=learning_rate,
-    buffer_size=buffer_size,
-    learning_starts=learning_starts,
     batch_size=batch_size,
-    tau=tau,
-    train_freq=(1, "step"), # Train every step
-    gradient_steps=gradient_steps,
-    target_update_interval=target_update_interval,
-    exploration_fraction=exploration_fraction,
-    exploration_final_eps=exploration_final_eps,
-    policy_kwargs=dict(normalize_images=False), # As per original code
-    seed=42, # Set seed for reproducibility
+    seed=42,
     device="cuda" if torch.cuda.is_available() else "cpu",
-    tensorboard_log=f"/kaggle/working/runs/{run_id}" if wandb_enabled else None # Log TB only if wandb enabled
+    tensorboard_log=f"/kaggle/working/runs/{run_id}" if wandb_enabled else None,
+    n_steps=2048,                      # 每次更新收集多少步（越大越穩）
+    gae_lambda=0.95,                   # GAE 的 lambda，平衡 bias/variance
+    ent_coef=0.01,                     # 探索正則化項（鼓勵策略多樣性）
+    clip_range=0.2,                    # PPO policy clip 範圍
+    n_epochs=10,                       # 每次更新時對資料重複訓練幾輪
+    policy_kwargs=dict(
+        normalize_images=False         # CNN 通常會自做 normalization
+    )
 )
+
 write_log(f"   模型建立完成. Device: {model.device}")
 if run: write_log(f"   使用 Wandb 超參數: {run.config}")
 else: write_log("   使用默認超參數 (Wandb 未啟用).")
