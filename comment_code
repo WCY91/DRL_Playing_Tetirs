@@ -1,0 +1,876 @@
+# --- 基本引入 ---
+import numpy as np               # 用於數值計算，特別是陣列操作
+import socket                    # 用於建立 TCP/IP socket 連線，與 Java Server 溝通
+import cv2                       # OpenCV 函式庫，用於影像處理 (讀取、縮放、顏色轉換)
+# import matplotlib.pyplot as plt # 繪圖用，此處非核心功能
+import subprocess                # 用於執行外部命令，例如啟動 Java Server 的 .jar 檔
+import os                        # 用於操作檔案系統，例如檢查檔案是否存在、建立目錄
+import shutil                    # 用於高階檔案操作 (此處未使用，但可能用於清理)
+import glob                      # 用於尋找符合特定規則的檔案路徑 (用於生成 GIF)
+import imageio                   # 用於讀寫多種影像格式，特別是生成 GIF
+import gymnasium as gym          # OpenAI Gym 的後繼者，提供標準的強化學習環境介面
+from gymnasium import spaces     # Gym 的模組，用於定義觀察空間和動作空間
+# from stable_baselines3.common.env_checker import check_env # 用於檢查自訂環境是否符合 Gym 標準 (對 VecEnv 無效)
+from stable_baselines3 import DQN # Stable Baselines3 提供的 DQN 演算法實現
+# from stable_baselines3.common.env_util import make_vec_env # 用於建立多個並行環境 (此處未使用)
+from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack, DummyVecEnv # SB3 提供的環境包裝器
+from IPython.display import FileLink, display # 在 Jupyter 環境中顯示檔案下載連結
+# from stable_baselines3.common.callbacks import BaseCallback # 自訂回呼函數的基底類別 (被 WandbCallback 取代)
+import torch                     # PyTorch 函式庫，SB3 底層使用它來建立和訓練神經網路
+import time                      # 提供時間相關功能，例如暫停、獲取時間戳
+import pygame                    # 用於建立遊戲視窗和圖形化顯示 (在 TetrisEnv 的 render 中使用)
+
+# --- Wandb Setup ---
+# import os                      # (上面已引入)
+import wandb                     # Weights & Biases 函式庫，用於實驗追蹤和視覺化
+from kaggle_secrets import UserSecretsClient # Kaggle 平台提供的讀取私密資訊 (API Key) 的方式
+from wandb.integration.sb3 import WandbCallback # Wandb 提供的與 SB3 整合的回呼函數
+
+# --- 組態設定 ---
+# 在這裡設定你的學號，用於儲存檔案的檔名
+STUDENT_ID = "113598065"
+# 設定總訓練步數 (Timesteps)，這個數值需要足夠大才能讓模型學會
+# 根據你的硬體和耐心調整，例如 100萬、200萬、500萬...
+TOTAL_TIMESTEPS = 500000 # 先設 50 萬步測試，實際訓練建議至少 100 萬以上
+
+# --- Wandb 登入與初始化 ---
+try:
+    # 嘗試從 Kaggle Secrets 讀取 Wandb API Key
+    user_secrets = UserSecretsClient()
+    WANDB_API_KEY = user_secrets.get_secret("WANDB_API_KEY")
+    # 設定環境變數，wandb.login() 會自動讀取
+    os.environ["WANDB_API_KEY"] = WANDB_API_KEY
+    wandb.login() # 登入 Wandb
+    wandb_enabled = True # 標記 Wandb 已啟用
+except Exception as e:
+    # 如果讀取 Secret 或登入失敗 (例如在本機或沒有設定 Secret)，則不使用 Wandb
+    print(f"Wandb login failed (running without secrets?): {e}. Running without Wandb logging.")
+    wandb_enabled = False
+    WANDB_API_KEY = None # 確保 API Key 是 None
+
+# 如果 Wandb 成功啟用，則初始化一個 Wandb run
+if wandb_enabled:
+    run = wandb.init(
+        project="tetris-training-improved", # Wandb 專案名稱
+        entity="t113598065-ntut-edu-tw",   # 你的 Wandb 帳號或團隊名稱
+        sync_tensorboard=True,     # 自動上傳 SB3 產生的 TensorBoard 日誌
+        monitor_gym=True,          # 自動監控 Gym 環境 (會上傳影片、圖表等)
+        save_code=True,            # 將執行時的程式碼儲存到 Wandb
+        config={ # 記錄這次執行的超參數，方便追蹤和比較
+            "policy_type": "CnnPolicy",          # 使用的策略類型 (卷積神經網路)
+            "total_timesteps": TOTAL_TIMESTEPS, # 總訓練步數
+            "env_id": "TetrisEnv-v1",           # 環境名稱 (自訂)
+            "gamma": 0.99,                      # 折扣因子 (Discount Factor)，未來獎勵的重要性
+            "learning_rate": 1e-4,              # 學習率，模型更新的幅度
+            "buffer_size": 300000,              # 經驗回放緩衝區大小 (Replay Buffer)
+            "learning_starts": 10000,           # 多少步之後才開始學習
+            "target_update_interval": 10000,    # 目標網路 (Target Network) 更新頻率
+            "exploration_fraction": 0.6,        # 探索率從 1.0 衰減到最終值所佔的訓練步數比例
+            "exploration_final_eps": 0.05,      # 探索率的最終值 (Epsilon)
+            "batch_size": 32,                   # 每次更新模型時從 Replay Buffer 取樣的數量
+            "n_stack": 4,                       # VecFrameStack 使用的堆疊幀數
+            "student_id": STUDENT_ID,           # 記錄學號
+        }
+    )
+    run_id = run.id # 獲取這次 Wandb run 的唯一 ID，用於檔案命名
+else:
+    run = None # Wandb 未啟用，run 設為 None
+    run_id = f"local_{int(time.time())}" # 建立一個基於時間戳的本地 ID
+
+# --- 日誌記錄 ---
+log_path = f"/kaggle/working/tetris_train_log_{run_id}.txt" # 日誌檔路徑
+def write_log(message, exc_info=False): # 增加 exc_info 參數用於記錄錯誤細節
+    """將訊息附加到日誌檔案並列印出來。"""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    log_message = f"{timestamp} - {message}"
+    # 如果要求記錄錯誤細節，加入 Traceback
+    if exc_info:
+        import traceback
+        log_message += "\n" + traceback.format_exc()
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(log_message + "\n")
+    except Exception as e:
+        print(f"Error writing to log file {log_path}: {e}")
+    print(log_message) # 總是列印到控制台
+
+# --- Java Server 處理 ---
+def wait_for_tetris_server(ip="127.0.0.1", port=10612, timeout=60):
+    """等待 Tetris TCP server 變得可用。"""
+    write_log(f"⏳ 等待 Tetris TCP server 啟動中 ({ip}:{port})...")
+    start_time = time.time()
+    while True:
+        try:
+            # 嘗試建立一個短暫的 socket 連線來測試 Server 是否已啟動並監聽
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_sock:
+                test_sock.settimeout(1.0) # 設定短超時
+                test_sock.connect((ip, port))
+            write_log("✅ Java TCP server 準備完成，連線成功")
+            return True # 連線成功，返回 True
+        except socket.error as e: # 連線失敗
+            if time.time() - start_time > timeout: # 檢查是否已超時
+                write_log(f"❌ 等待 Java TCP server 超時 ({timeout}s)")
+                return False # 超時，返回 False
+            time.sleep(1.0) # 等待 1 秒後重試
+
+# --- 啟動 Java Server ---
+java_process = None # 初始化 Java Process 物件為 None
+try:
+    write_log("🚀 嘗試啟動 Java Tetris server...")
+    jar_file = "TetrisTCPserver_v0.6.jar" # 指定 JAR 檔名
+    if not os.path.exists(jar_file): # 檢查檔案是否存在
+         write_log(f"❌ 錯誤: 找不到 JAR 檔案 '{jar_file}'。請確保它在工作目錄中。")
+         raise FileNotFoundError(f"JAR file '{jar_file}' not found.")
+
+    # 使用 subprocess.Popen 啟動 Java 進程
+    # stdout=subprocess.DEVNULL 和 stderr=subprocess.DEVNULL 可以隱藏 Java Server 的輸出，讓控制台更乾淨
+    java_process = subprocess.Popen(
+        ["java", "-jar", jar_file],
+        stdout=subprocess.DEVNULL, # 將標準輸出重定向到空設備
+        stderr=subprocess.DEVNULL  # 將標準錯誤重定向到空設備
+    )
+    write_log(f"✅ Java server process 啟動 (PID: {java_process.pid})")
+    # 等待 Server 真正啟動完成
+    if not wait_for_tetris_server():
+        raise TimeoutError("Java server did not become available.") # 如果超時則拋出錯誤
+
+except Exception as e:
+    # 處理啟動或等待過程中的任何錯誤
+    write_log(f"❌ 啟動或等待 Java server 時發生錯誤: {e}")
+    # 如果進程已啟動但連線失敗，嘗試終止它
+    if java_process and java_process.poll() is None:
+         write_log("   嘗試終止未成功連接的 Java server process...")
+         java_process.terminate() # 嘗試正常終止
+         try:
+             java_process.wait(timeout=2) # 等待 2 秒
+         except subprocess.TimeoutExpired: # 如果無法正常終止
+             java_process.kill() # 強制結束
+    raise # 將錯誤重新拋出，停止腳本執行
+
+# --- 檢查 GPU ---
+if torch.cuda.is_available(): # 檢查 PyTorch 是否能偵測到 CUDA (NVIDIA GPU)
+    device_name = torch.cuda.get_device_name(0) # 獲取 GPU 名稱
+    write_log(f"✅ PyTorch is using GPU: {device_name}")
+else:
+    write_log("⚠️ PyTorch is using CPU. Training will be significantly slower.")
+
+# ----------------------------
+# 定義 Tetris 環境 (TetrisEnv Class)
+# ----------------------------
+class TetrisEnv(gym.Env):
+    """自訂的 Tetris 環境，透過 TCP Socket 與 Java Server 互動。"""
+    # metadata 用於 Gym 環境註冊和渲染設定
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
+    # 定義環境屬性 (常數)
+    N_DISCRETE_ACTIONS = 5  # 動作數量 (左, 右, 左旋, 右旋, 下放)
+    IMG_HEIGHT = 200        # Java Server 原始影像高度
+    IMG_WIDTH = 100         # Java Server 原始影像寬度
+    IMG_CHANNELS = 3        # Java Server 原始影像通道數 (BGR)
+    RESIZED_DIM = 84        # 處理後輸入給神經網路的影像大小 (通常用 84x84)
+
+    def __init__(self, host_ip="127.0.0.1", host_port=10612, render_mode=None):
+        """環境初始化函式。"""
+        super().__init__() # 呼叫父類別 (gym.Env) 的初始化
+        self.render_mode = render_mode # 設定渲染模式 (human:顯示視窗, rgb_array:返回影像陣列, None:不渲染)
+        # 定義動作空間：離散空間，包含 N_DISCRETE_ACTIONS 個動作 (0 到 4)
+        self.action_space = spaces.Discrete(self.N_DISCRETE_ACTIONS)
+        # 定義觀察空間：Box 空間，代表一個影像
+        self.observation_space = spaces.Box(
+            low=0, high=255,                          # 像素值範圍 (灰度圖)
+            shape=(1, self.RESIZED_DIM, self.RESIZED_DIM), # 形狀 (通道數, 高, 寬)，通道數為 1 代表灰度圖，且通道在前 (PyTorch CNN 要求)
+            dtype=np.uint8                            # 資料型態為 8 位元無符號整數
+        )
+        self.server_ip = host_ip     # Java Server IP
+        self.server_port = host_port # Java Server Port
+        self.client_sock = None      # 初始化 Socket 物件為 None
+        self._connect_socket()       # 在初始化時就建立 Socket 連線
+
+        # --- 內部狀態變數，用於計算獎勵和統計 ---
+        self.lines_removed = 0      # 累計消除的行數
+        self.current_height = 0     # 當前堆疊的最高高度
+        self.current_holes = 0      # 當前盤面上的孔洞數量
+        self.lifetime = 0           # 當前這一局遊戲進行的步數
+        # 儲存最後一次收到的觀察值 (處理後的灰度圖)，用於錯誤處理或 reset
+        self.last_observation = np.zeros(self.observation_space.shape, dtype=np.uint8)
+        # 儲存最後一次收到的原始渲染幀 (BGR, Resized)，用於 render()
+        self.last_raw_render_frame = np.zeros((self.RESIZED_DIM, self.RESIZED_DIM, 3), dtype=np.uint8)
+
+        # --- 獎勵塑形 (Reward Shaping) 係數 (這些值非常關鍵，需要根據訓練效果調整！) ---
+        self.reward_line_clear_coeff = 100.0   # 消除行獎勵的基礎係數 (乘以消除行數的平方)
+        self.penalty_height_increase_coeff = 15.0 # 高度增加懲罰的係數
+        self.penalty_hole_increase_coeff = 25.0   # 孔洞增加懲罰的係數
+        self.penalty_step_coeff = 0.1             # 每走一步的微小懲罰 (鼓勵效率)
+        self.penalty_game_over_coeff = 500.0      # 遊戲結束的巨大懲罰
+
+        # --- 用於 Pygame 渲染的變數 ---
+        self.window_surface = None  # Pygame 視窗表面
+        self.clock = None           # Pygame 時鐘，用於控制幀率
+        self.is_pygame_initialized = False # 追蹤 Pygame 是否已初始化
+
+    def _initialize_pygame(self):
+        """如果尚未初始化 Pygame，則進行初始化 (僅在 human 模式需要)。"""
+        if not self.is_pygame_initialized and self.render_mode == "human":
+            try:
+                import pygame # 在需要時才 import
+                pygame.init() # 初始化 Pygame 所有模組
+                pygame.display.init() # 初始化顯示模組
+                # 設定視窗大小 (放大一點比較好看)
+                window_width = self.RESIZED_DIM * 4
+                window_height = self.RESIZED_DIM * 4
+                self.window_surface = pygame.display.set_mode((window_width, window_height))
+                pygame.display.set_caption(f"Tetris Env ({self.server_ip}:{self.server_port})") # 設定視窗標題
+                self.clock = pygame.time.Clock() # 建立時鐘物件
+                self.is_pygame_initialized = True # 標記已初始化
+                # write_log("   Pygame initialized for rendering.") # 可選：日誌記錄
+            except ImportError: # 如果使用者沒有安裝 pygame
+                write_log("⚠️ Pygame not installed, cannot use 'human' render mode.")
+                self.render_mode = None # 關閉 human 渲染模式
+            except Exception as e: # 其他 Pygame 初始化錯誤
+                write_log(f"⚠️ Error initializing Pygame: {e}")
+                self.render_mode = None
+
+    def _connect_socket(self):
+        """建立與遊戲伺服器的 Socket 連線。"""
+        try:
+            if self.client_sock: # 如果已存在舊連線，先關閉
+                self.client_sock.close()
+            self.client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # 建立 TCP Socket
+            self.client_sock.settimeout(10.0) # 設定 Socket 操作的超時時間 (10秒)
+            self.client_sock.connect((self.server_ip, self.server_port)) # 連線到 Server
+        except socket.error as e: # 處理連線錯誤
+            write_log(f"❌ Socket connection error during connect: {e}")
+            # 拋出更明確的錯誤類型，指示連線失敗
+            raise ConnectionError(f"Failed to connect to Tetris server at {self.server_ip}:{self.server_port}")
+
+    def _send_command(self, command: bytes):
+        """向伺服器發送指令，並處理潛在錯誤。"""
+        if not self.client_sock: # 檢查 Socket 是否已連線
+             raise ConnectionError("Socket is not connected. Cannot send command.")
+        try:
+            self.client_sock.sendall(command) # 發送所有資料
+        except socket.timeout: # 處理超時
+            write_log("❌ Socket timeout during send.")
+            raise ConnectionAbortedError("Socket timeout during send")
+        except socket.error as e: # 處理其他 Socket 錯誤
+            write_log(f"❌ Socket error during send: {e}")
+            raise ConnectionAbortedError(f"Socket error during send: {e}")
+
+    def _receive_data(self, size):
+        """從伺服器接收指定大小的資料。"""
+        if not self.client_sock: # 檢查 Socket 是否已連線
+             raise ConnectionError("Socket is not connected. Cannot receive data.")
+        data = b"" # 初始化接收資料的 byte string
+        try:
+            self.client_sock.settimeout(10.0) # 為接收設定超時
+            while len(data) < size: # 迴圈直到收到足夠的資料
+                # 嘗試接收剩餘所需的資料量
+                chunk = self.client_sock.recv(size - len(data))
+                if not chunk: # 如果收到空 chunk，表示連線可能已中斷
+                    write_log("❌ Socket connection broken during receive (received empty chunk).")
+                    raise ConnectionAbortedError("Socket connection broken")
+                data += chunk # 將收到的 chunk 加入 data
+        except socket.timeout: # 處理超時
+             write_log(f"❌ Socket timeout during receive (expected {size}, got {len(data)}).")
+             raise ConnectionAbortedError("Socket timeout during receive")
+        except socket.error as e: # 處理其他 Socket 錯誤
+            write_log(f"❌ Socket error during receive: {e}")
+            raise ConnectionAbortedError(f"Socket error during receive: {e}")
+        return data # 返回接收到的完整資料
+
+    def get_tetris_server_response(self):
+        """透過 Socket 從 Tetris Server 獲取狀態更新。"""
+        try:
+            # --- 按照 Server 的協議依序接收資料 ---
+            is_game_over_byte = self._receive_data(1) # 1 byte: 遊戲是否結束 (0x01=是, 0x00=否)
+            is_game_over = (is_game_over_byte == b'\x01')
+
+            removed_lines_bytes = self._receive_data(4) # 4 bytes: 總消除行數 (整數)
+            removed_lines = int.from_bytes(removed_lines_bytes, 'big') # 'big'表示大端序
+
+            height_bytes = self._receive_data(4) # 4 bytes: 當前最大高度 (整數)
+            height = int.from_bytes(height_bytes, 'big')
+
+            holes_bytes = self._receive_data(4) # 4 bytes: 當前孔洞數 (整數)
+            holes = int.from_bytes(holes_bytes, 'big')
+
+            img_size_bytes = self._receive_data(4) # 4 bytes: 接下來影像資料的大小 (整數)
+            img_size = int.from_bytes(img_size_bytes, 'big')
+
+            # 檢查影像大小是否合理，防止接收超大資料導致記憶體問題
+            if img_size <= 0 or img_size > 1000000: # 設定一個合理的上限 (例如 1MB)
+                 write_log(f"❌ Received invalid image size: {img_size}. Aborting receive.")
+                 raise ValueError(f"Invalid image size received: {img_size}")
+
+            img_png = self._receive_data(img_size) # 接收實際的影像資料 (PNG 格式)
+
+            # --- 解碼並預處理影像 ---
+            nparr = np.frombuffer(img_png, np.uint8) # 將接收到的 bytes 轉換為 NumPy 陣列
+            # 使用 OpenCV 解碼 PNG 影像，IMREAD_COLOR 確保總是讀取為 3 通道 BGR 影像
+            np_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if np_image is None: # 檢查解碼是否成功
+                 write_log("❌ Failed to decode image from server response.")
+                 # 解碼失敗，返回最後已知的狀態並標記遊戲結束
+                 return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+
+            # 將影像縮放到指定的觀察大小 (例如 84x84)
+            # INTER_AREA 通常適用於縮小影像
+            resized = cv2.resize(np_image, (self.RESIZED_DIM, self.RESIZED_DIM), interpolation=cv2.INTER_AREA)
+            # 將 BGR 影像轉換為灰度圖
+            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            # 增加一個通道維度，從 (H, W) 變成 (1, H, W)，並確保資料型態是 uint8
+            observation = np.expand_dims(gray, axis=0).astype(np.uint8)
+
+            # --- 儲存結果 ---
+            # 儲存縮放後的 BGR 影像，用於 render() 顯示
+            self.last_raw_render_frame = resized.copy()
+            # 儲存處理過的觀察值 (灰度圖，通道在前)
+            self.last_observation = observation.copy()
+
+            # 返回所有從 Server 獲取的狀態
+            return is_game_over, removed_lines, height, holes, observation
+
+        except (ConnectionAbortedError, ConnectionRefusedError, ValueError) as e:
+             # 處理連線中斷、被拒絕或數值錯誤 (例如無效影像大小)
+             write_log(f"❌ Connection/Value error getting server response: {e}. Ending episode.")
+             # 返回最後狀態並標記結束
+             return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+        except Exception as e: # 處理其他所有未預期的錯誤
+            write_log(f"❌ Unexpected error getting server response: {e}. Ending episode.")
+            # 返回最後狀態並標記結束
+            return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+
+    def step(self, action):
+        """執行一個動作，並返回結果 (觀察值, 獎勵, 是否終止, 是否截斷, 附加資訊)。"""
+        # --- 發送動作指令 ---
+        # 將離散的動作編號映射到 Server 的指令字串
+        command_map = {
+            0: b"move -1\n", 1: b"move 1\n",   # 左右移動
+            2: b"rotate 0\n", 3: b"rotate 1\n", # 旋轉 (假設 0 和 1 代表不同方向)
+            4: b"drop\n"                       # 下放到底
+        }
+        command = command_map.get(action) # 根據 action 獲取指令
+        if command is None: # 如果收到無效的 action 編號
+            write_log(f"⚠️ Invalid action received: {action}. Sending 'drop'.")
+            command = b"drop\n" # 預設發送 'drop' 作為安全措施
+
+        try:
+            self._send_command(command) # 發送指令
+        except (ConnectionAbortedError, ConnectionError) as e: # 如果發送失敗 (連線問題)
+            write_log(f"❌ Ending episode due to send failure in step: {e}")
+            terminated = True # 必須終止這一局
+            observation = self.last_observation.copy() # 使用最後的觀察值
+            reward = self.penalty_game_over_coeff * -1 # 給予遊戲結束的懲罰
+            # 設定 info 字典，包含一些最終狀態和錯誤訊息
+            info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime, 'final_status': 'send_error'}
+            # SB3 要求在 terminated 為 True 時，info 中包含 'terminal_observation'
+            info['terminal_observation'] = observation
+            # terminated=True, truncated=False (遊戲是自然結束，不是因為時間限制等原因截斷)
+            return observation, reward, terminated, False, info
+
+        # --- 獲取執行動作後的新狀態 ---
+        terminated, new_lines_removed, new_height, new_holes, observation = self.get_tetris_server_response()
+
+        # --- 計算獎勵 (Reward Shaping) ---
+        reward = 0.0 # 初始化獎勵為 0
+
+        # 1. 計算這次 step 消除了多少行
+        lines_cleared_this_step = new_lines_removed - self.lines_removed
+        if lines_cleared_this_step > 0:
+            # 使用消除行數的平方給予獎勵，大力鼓勵一次消除多行 (例如 Tetris)
+            reward += (lines_cleared_this_step ** 2) * self.reward_line_clear_coeff
+
+        # 2. 計算高度增加了多少，並給予懲罰
+        height_increase = new_height - self.current_height
+        if height_increase > 0:
+            reward -= height_increase * self.penalty_height_increase_coeff
+
+        # 3. 計算孔洞增加了多少，並給予懲罰
+        hole_increase = new_holes - self.current_holes
+        if hole_increase > 0:
+            reward -= hole_increase * self.penalty_hole_increase_coeff
+
+        # 4. 每走一步給予微小的負獎勵，鼓勵模型盡快完成遊戲或消除行
+        reward -= self.penalty_step_coeff
+
+        # 5. 如果遊戲結束 (terminated)，給予一個大的負獎勵
+        if terminated:
+            reward -= self.penalty_game_over_coeff
+            # 可選：在此處記錄遊戲結束的訊息，但可能會太頻繁，移到 reset 或回呼函數中記錄更好
+            # write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}")
+
+        # --- 更新環境內部狀態 ---
+        self.lines_removed = new_lines_removed # 更新累計消除行數
+        self.current_height = new_height     # 更新當前高度
+        self.current_holes = new_holes       # 更新當前孔洞數
+        self.lifetime += 1                   # 增加遊戲步數計數
+
+        # --- 準備返回 Gym 標準格式的資訊 ---
+        # info 字典可以包含任何你想傳遞的額外除錯或統計資訊
+        info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime}
+        truncated = False # 在這個環境中，我們不使用 truncated (截斷) 概念
+
+        # 關鍵！如果遊戲結束 (terminated)，必須在 info 中加入 'terminal_observation'
+        # SB3 的演算法 (例如 DQN) 需要這個資訊來正確計算最後一步的價值
+        if terminated:
+            info['terminal_observation'] = observation.copy()
+
+        # 可選：如果在 step 中渲染 (例如 human 模式)
+        if self.render_mode == "human":
+             self.render()
+
+        # 返回 (觀察值, 獎勵, 是否終止, 是否截斷, 附加資訊)
+        return observation, reward, terminated, truncated, info
+
+    def reset(self, seed=None, options=None):
+        """重置環境到初始狀態。"""
+        # 呼叫父類別的 reset，處理 seed 等標準功能
+        super().reset(seed=seed)
+
+        # --- 嘗試與 Server 通訊並開始新遊戲，包含重試和重連機制 ---
+        for attempt in range(3): # 最多嘗試 3 次
+            try:
+                # 發送 "start" 指令給 Server
+                self._send_command(b"start\n")
+                # 獲取 Server 返回的初始狀態
+                terminated, lines, height, holes, observation = self.get_tetris_server_response()
+
+                # 檢查 Server 是否在 reset 後立刻回報遊戲結束 (異常情況)
+                if terminated:
+                    write_log(f"⚠️ Server reported game over on reset attempt {attempt+1}. Retrying...")
+                    if attempt < 2: # 如果不是最後一次嘗試
+                         self._connect_socket() # 嘗試重新建立 Socket 連線
+                         time.sleep(0.5) # 等待一小段時間再重試
+                         continue # 繼續下一次迴圈嘗試
+                    else: # 如果多次嘗試後仍然失敗
+                         write_log("❌ Server still terminated after multiple reset attempts. Cannot proceed.")
+                         raise RuntimeError("Tetris server failed to reset properly.")
+
+                # --- Reset 成功 ---
+                # 重置內部統計變數
+                self.lines_removed = 0
+                self.current_height = height # 使用 Server 返回的初始高度
+                self.current_holes = holes   # 使用 Server 返回的初始孔洞數
+                self.lifetime = 0
+                self.last_observation = observation.copy() # 儲存初始觀察值
+                # write_log(f"🔄 Environment Reset. Initial state: H={height}, O={holes}") # 可選的詳細日誌
+                info = {} # reset 通常返回空的 info
+                return observation, info # 返回初始觀察值和空的 info
+
+            except (ConnectionAbortedError, ConnectionError, socket.error, TimeoutError) as e:
+                 # 處理 reset 過程中的連線相關錯誤
+                 write_log(f"🔌 Connection issue during reset attempt {attempt+1} ({e}). Retrying...")
+                 if attempt < 2: # 如果不是最後一次嘗試
+                      try:
+                          self._connect_socket() # 嘗試重連
+                          time.sleep(0.5)
+                      except ConnectionError: # 如果重連也失敗
+                           write_log("   Reconnect failed.")
+                           # 如果第二次嘗試也失敗，就放棄並拋出錯誤
+                           if attempt == 1:
+                               raise RuntimeError(f"Failed to reconnect and reset Tetris server after multiple attempts: {e}")
+                 else: # 如果是最後一次嘗試失敗
+                     raise RuntimeError(f"Failed to reset Tetris server after multiple attempts: {e}")
+
+        # 理論上不應該執行到這裡，但作為保險
+        raise RuntimeError("Failed to reset Tetris server.")
+
+    def render(self):
+        """根據設定的 render_mode 渲染環境狀態。"""
+        # 如果是 human 模式，確保 Pygame 已初始化
+        self._initialize_pygame()
+
+        if self.render_mode == "human" and self.is_pygame_initialized:
+            # 使用 Pygame 顯示視窗
+            import pygame # 確保 pygame 已引入
+            if self.window_surface is None: # 防禦性檢查
+                 write_log("⚠️ Render called but Pygame window is not initialized.")
+                 return
+
+            # 檢查是否有可供渲染的幀
+            if hasattr(self, 'last_raw_render_frame'):
+                try:
+                    # --- 將 OpenCV (BGR) 影像轉換為 Pygame (RGB) 表面 ---
+                    # self.last_raw_render_frame 是 (H, W, 3) 的 BGR NumPy 陣列
+                    # 1. 顏色轉換 BGR -> RGB
+                    render_frame_rgb = cv2.cvtColor(self.last_raw_render_frame, cv2.COLOR_BGR2RGB)
+                    # 2. 建立一個 Pygame Surface，大小與原始幀相同
+                    surf = pygame.Surface((self.RESIZED_DIM, self.RESIZED_DIM))
+                    # 3. 將 NumPy 陣列繪製到 Surface 上
+                    #    pygame.surfarray.blit_array 需要 (W, H, C) 的形狀，所以要 transpose
+                    pygame.surfarray.blit_array(surf, np.transpose(render_frame_rgb, (1, 0, 2)))
+                    # 4. 將 Surface 放大到視窗大小
+                    surf = pygame.transform.scale(surf, self.window_surface.get_size())
+                    # 5. 將放大後的 Surface 繪製到視窗表面上
+                    self.window_surface.blit(surf, (0, 0))
+                    # --- 更新顯示與控制幀率 ---
+                    pygame.event.pump() # 處理 Pygame 內部事件佇列
+                    pygame.display.flip() # 將繪製的內容更新到螢幕上
+                    self.clock.tick(self.metadata["render_fps"]) # 根據設定的 FPS 控制迴圈速度
+                except Exception as e: # 處理渲染過程中的錯誤
+                    write_log(f"⚠️ Error during Pygame rendering: {e}")
+            else:
+                # 如果還沒有收到任何幀，顯示黑色畫面
+                 self.window_surface.fill((0, 0, 0))
+                 pygame.display.flip()
+
+        elif self.render_mode == "rgb_array":
+             # 直接返回影像陣列 (通常用於錄製影片或在無頭環境中使用)
+             if hasattr(self, 'last_raw_render_frame'):
+                 # 返回 (H, W, 3) 的 RGB NumPy 陣列
+                 return cv2.cvtColor(self.last_raw_render_frame, cv2.COLOR_BGR2RGB)
+             else:
+                 # 如果還沒有幀，返回一個黑色畫面的陣列
+                 return np.zeros((self.RESIZED_DIM, self.RESIZED_DIM, 3), dtype=np.uint8)
+
+    def close(self):
+        """關閉環境，釋放資源。"""
+        # 關閉 Socket 連線
+        if self.client_sock:
+            try:
+                self.client_sock.close()
+            except socket.error as e:
+                 write_log(f"   Error closing socket: {e}")
+            self.client_sock = None
+        # 關閉 Pygame 視窗和模組
+        if self.is_pygame_initialized:
+            try:
+                import pygame
+                pygame.display.quit()
+                pygame.quit()
+                self.is_pygame_initialized = False
+            except Exception as e:
+                 write_log(f"   Error closing Pygame: {e}")
+
+# --- 環境設定 (訓練用) ---
+write_log("✅ 建立基礎環境函數 make_env...")
+def make_env():
+    """輔助函數，用於建立一個 TetrisEnv 實例。"""
+    env = TetrisEnv()
+    return env
+
+write_log("✅ 建立向量化環境 (DummyVecEnv)...")
+# 因為 Java Server 通常只接受一個客戶端連線，所以使用 DummyVecEnv
+# 它只是簡單地在單一進程中依序執行環境，提供 VecEnv 介面
+train_env_base = DummyVecEnv([make_env])
+
+write_log("✅ 包裝環境 (VecFrameStack)...")
+# VecFrameStack：將連續 n_stack 幀的觀察值堆疊在一起
+# 這讓基於 CNN 的策略能獲取物體運動的時序資訊
+# channels_order="first" 表示堆疊後的通道維度在前 (C, H, W)，符合 PyTorch 要求
+n_stack = run.config["n_stack"] if run else 4 # 從 wandb config 獲取 n_stack，若無則用預設值 4
+train_env_stacked = VecFrameStack(train_env_base, n_stack=n_stack, channels_order="first")
+
+write_log("✅ 包裝環境 (VecNormalize - Rewards Only)...")
+# VecNormalize：用於標準化觀察值和/或獎勵
+# 標準化獎勵 (norm_reward=True) 通常有助於穩定 DQN 等演算法的學習，因為它能控制獎勵的範圍
+# 標準化觀察值 (norm_obs=True) 對於 MLP 策略很重要，但對於 CNN 策略 (CnnPolicy)，
+#   SB3 的 CnnPolicy 內部通常會自己處理影像的標準化/縮放，或者可以透過 policy_kwargs 控制。
+#   這裡根據原始程式碼和常見做法，設定 norm_obs=False，只標準化獎勵。
+# gamma：需要將訓練時使用的折扣因子 gamma 傳遞給 VecNormalize，它會用來計算累積獎勵的移動平均
+gamma = run.config["gamma"] if run else 0.99 # 從 wandb config 獲取 gamma
+train_env = VecNormalize(train_env_stacked, norm_obs=False, norm_reward=True, gamma=gamma)
+
+write_log("   環境建立完成並已包裝 (DummyVecEnv -> VecFrameStack -> VecNormalize)")
+
+# ----------------------------
+# DQN 模型設定與訓練
+# ----------------------------
+write_log("🧠 設定 DQN 模型...")
+# --- 從 Wandb Config 或使用預設值獲取超參數 ---
+# 這樣可以方便地透過 Wandb UI 來調整和追蹤實驗的超參數設定
+policy_type = run.config["policy_type"] if run else "CnnPolicy"
+learning_rate = run.config["learning_rate"] if run else 1e-4
+buffer_size = run.config["buffer_size"] if run else 100000 # 經驗回放緩衝區大小
+learning_starts = run.config["learning_starts"] if run else 10000 # 開始學習前收集的步數
+batch_size = run.config["batch_size"] if run else 32 # 每次梯度更新的樣本數
+tau = 1.0 # DQN 中 Target Network 的軟更新係數 (τ)，1.0 代表硬更新 (Hard Update)
+target_update_interval = run.config["target_update_interval"] if run else 10000 # Target Network 更新頻率 (步數)
+gradient_steps = 1 # 每次 train_freq 觸發時執行的梯度更新次數
+# 探索率 (Epsilon-Greedy) 相關參數
+exploration_fraction = run.config["exploration_fraction"] if run else 0.1 # 預設 DQN 的探索衰減較快
+exploration_final_eps = run.config["exploration_final_eps"] if run else 0.05 # 探索率最終值
+
+# --- 建立 DQN 模型 ---
+model = DQN(
+    policy=policy_type,                   # 策略類型 ("CnnPolicy" 使用內建的 CNN 特徵提取器)
+    env=train_env,                        # 訓練環境 (已經過 VecFrameStack 和 VecNormalize 包裝)
+    verbose=1,                            # 設定日誌詳細程度 (1: 顯示訓練進度)
+    gamma=gamma,                          # 折扣因子
+    learning_rate=learning_rate,          # 學習率
+    buffer_size=buffer_size,              # Replay Buffer 大小
+    learning_starts=learning_starts,      # 開始學習的步數
+    batch_size=batch_size,                # 批次大小
+    tau=tau,                              # Target Network 更新係數
+    train_freq=(1, "step"),               # 訓練頻率 (每 1 步訓練 1 次)
+    gradient_steps=gradient_steps,        # 每次訓練執行的梯度更新步數
+    target_update_interval=target_update_interval, # Target Network 更新間隔 (步數)
+    exploration_fraction=exploration_fraction,     # 探索率衰減所佔的總步數比例
+    exploration_final_eps=exploration_final_eps,   # 最終探索率
+    # policy_kwargs 用於傳遞額外參數給 Policy 類別
+    # normalize_images=False 根據原始程式碼設定，SB3 CnnPolicy 通常會做基本縮放，
+    # 這個 flag 的具體作用可能需要查閱 SB3 原始碼確認，但我們先保留它。
+    policy_kwargs=dict(normalize_images=False),
+    seed=42,                              # 設定隨機種子以保證可重複性
+    device="cuda" if torch.cuda.is_available() else "cpu", # 自動選擇 GPU 或 CPU
+    # 如果 Wandb 啟用，設定 TensorBoard 日誌路徑，WandbCallback 會讀取這裡的日誌
+    tensorboard_log=f"/kaggle/working/runs/{run_id}" if wandb_enabled else None
+)
+write_log(f"   模型建立完成. Device: {model.device}") # 顯示模型使用的裝置
+if run: write_log(f"   使用 Wandb 超參數: {run.config}") # 顯示使用的超參數來源
+else: write_log("   使用默認超參數 (Wandb 未啟用).")
+
+# --- 設定回呼函數 (Callback) ---
+# 回呼函數可以在訓練過程中的特定點執行自訂程式碼 (例如記錄、儲存模型)
+if wandb_enabled:
+    # 使用 Wandb 提供的回呼函數
+    wandb_callback = WandbCallback(
+        gradient_save_freq=10000, # 每隔多少步儲存一次梯度直方圖 (用於除錯)
+        # 設定模型檢查點的儲存路徑和頻率
+        model_save_path=f"/kaggle/working/models/{run_id}", # 本地儲存路徑
+        model_save_freq=50000, # 每隔多少步儲存一次模型
+        log="all", # 記錄所有可用資訊 (梯度、網路權重直方圖等)
+        verbose=2 # 顯示更詳細的回呼函數日誌
+    )
+    callback_list = [wandb_callback] # 將回呼函數放入列表
+else:
+    callback_list = None # 如果 Wandb 未啟用，則不使用回呼函數
+
+# --- 開始訓練 ---
+write_log(f"🚀 開始訓練 {TOTAL_TIMESTEPS} 步...")
+training_successful = False # 標記訓練是否成功完成
+try:
+    # 呼叫 model.learn() 開始訓練
+    model.learn(
+        total_timesteps=TOTAL_TIMESTEPS, # 總訓練步數
+        callback=callback_list,          # 傳入回呼函數列表
+        log_interval=10                  # 每隔 10 局遊戲 (episode) 在控制台輸出一次基本訓練資訊 (獎勵等)
+    )
+    write_log("✅ 訓練完成!")
+    training_successful = True # 標記訓練成功
+except Exception as e:
+     # 捕捉訓練過程中的任何錯誤
+     write_log(f"❌ 訓練過程中發生錯誤: {e}", exc_info=True) # 記錄詳細錯誤資訊
+     # 在發生錯誤時，嘗試儲存當前的模型狀態，以便後續分析或繼續訓練
+     error_save_path = f'/kaggle/working/{STUDENT_ID}_dqn_error_save.zip'
+     try:
+        model.save(error_save_path)
+        write_log(f"   模型已嘗試儲存至 {error_save_path}")
+        # 如果 Wandb 啟用，也上傳這個錯誤時儲存的模型
+        if wandb_enabled: wandb.save(error_save_path)
+     except Exception as save_e: # 如果連儲存模型都失敗
+         write_log(f"   ❌ 儲存錯誤模型時也發生錯誤: {save_e}")
+     # 如果 Wandb run 正在運行，將其標記為失敗並結束
+     if run and run.is_running: run.finish(exit_code=1, quiet=True)
+
+# --- 儲存最終模型 (僅在訓練成功完成時執行) ---
+if training_successful:
+    # 定義 VecNormalize 統計數據和最終模型的儲存路徑
+    stats_path = f"/kaggle/working/vecnormalize_stats_{run_id}.pkl"
+    final_model_name = f'{STUDENT_ID}_dqn_final_{run_id}.zip'
+    final_model_path = os.path.join("/kaggle/working", final_model_name)
+
+    try:
+        # 關鍵！儲存 VecNormalize 的統計數據 (平均值、變異數等)
+        # 這些數據在之後載入模型進行評估或推論時是必需的
+        train_env.save(stats_path)
+        write_log(f"   VecNormalize 統計數據已儲存至 {stats_path}")
+        if wandb_enabled: wandb.save(stats_path) # 上傳到 Wandb
+
+        # 儲存訓練好的 DQN 模型
+        model.save(final_model_path)
+        write_log(f"✅ 最終模型已儲存: {final_model_path}")
+        display(FileLink(final_model_path)) # 在 Jupyter 中顯示下載連結
+        if wandb_enabled: wandb.save(final_model_path) # 上傳到 Wandb
+
+    except Exception as e: # 處理儲存過程中的錯誤
+        write_log(f"❌ 儲存最終模型或統計數據時出錯: {e}")
+        training_successful = False # 如果儲存失敗，也標記為不成功
+
+# ----------------------------
+# 評估 (Evaluation) (僅在訓練和儲存成功時執行)
+# ----------------------------
+if training_successful:
+    write_log("\n🧪 開始評估訓練後的模型...")
+
+    # --- 建立評估環境 (重點：結構需與訓練時匹配) ---
+    eval_env = None # 初始化為 None
+    try:
+        # 1. 建立基礎的向量化環境
+        eval_env_base = DummyVecEnv([make_env])
+
+        # 2. 套用 VecFrameStack (參數需與訓練時相同)
+        n_stack_eval = run.config["n_stack"] if run else 4
+        eval_env_stacked = VecFrameStack(eval_env_base, n_stack=n_stack_eval, channels_order="first")
+
+        # 3. 載入訓練時儲存的 VecNormalize 統計數據
+        #    將統計數據應用到 'eval_env_stacked' 上
+        eval_env = VecNormalize.load(stats_path, eval_env_stacked)
+
+        # 4. 設定 VecNormalize 的模式為評估模式
+        eval_env.training = False    # 不再更新移動平均和變異數
+        eval_env.norm_reward = False # **不**標準化獎勵，這樣才能看到真實的原始獎勵分數
+
+        write_log("   評估環境建立成功.")
+
+    except FileNotFoundError: # 如果找不到統計檔案
+        write_log(f"❌ 錯誤: VecNormalize 統計文件未找到於 {stats_path}。跳過評估。")
+        eval_env = None
+    except Exception as e: # 處理建立評估環境時的其他錯誤
+        write_log(f"❌ 建立評估環境時出錯: {e}")
+        eval_env = None
+
+    # --- 執行評估迴圈 (僅在評估環境成功建立時) ---
+    if eval_env is not None:
+        num_eval_episodes = 5 # 設定要評估多少局遊戲
+        total_rewards = []    # 儲存每局的總獎勵
+        total_lines = []      # 儲存每局的最終消除行數
+        total_lifetimes = []  # 儲存每局的總步數
+        all_frames = []       # 儲存第一局遊戲的所有幀，用於製作 GIF
+
+        try:
+            for i in range(num_eval_episodes): # 迴圈執行 N 局遊戲
+                obs = eval_env.reset() # 重置環境，獲取初始觀察值
+                done = False           # 標記遊戲是否結束
+                episode_reward = 0     # 初始化當局獎勵
+                episode_lines = 0      # 初始化當局行數
+                episode_lifetime = 0   # 初始化當局步數
+                frames = []            # 初始化當局的幀列表
+                last_info = {}         # 初始化最後一步的 info
+
+                while not done: # 在一局遊戲結束前持續執行
+                    # --- 獲取用於渲染 GIF 的原始幀 ---
+                    # 需要訪問被層層包裝的原始 TetrisEnv 實例
+                    try:
+                         # eval_env(VecNormalize) -> eval_env_stacked(VecFrameStack) -> eval_env_base(DummyVecEnv) -> TetrisEnv
+                         base_env = eval_env.get_attr("envs")[0].env # 獲取原始 TetrisEnv
+                         raw_frame = base_env.render(mode="rgb_array") # 呼叫其 render 方法
+                         # 只記錄第一局的幀
+                         if i == 0: frames.append(raw_frame)
+                    except Exception as render_err:
+                         write_log(f"⚠️ 評估時獲取渲染幀出錯: {render_err}")
+
+                    # --- 預測動作並執行 ---
+                    # 使用訓練好的模型 'model' 來預測動作
+                    # deterministic=True 表示不加入任何探索雜訊，採取模型認為最優的動作
+                    action, _ = model.predict(obs, deterministic=True)
+                    # 在評估環境中執行動作
+                    obs, reward, done, infos = eval_env.step(action)
+
+                    # --- 累計獎勵和統計數據 ---
+                    # reward 是 VecEnv 返回的列表 (即使只有一個環境)，取第一個元素
+                    # 由於 eval_env.norm_reward = False，這裡的 reward 是未經標準化的原始獎勵
+                    episode_reward += reward[0]
+                    # infos 也是列表，取第一個元素的 info 字典
+                    last_info = infos[0]
+                    # 從 info 中安全地獲取 'removed_lines' 和 'lifetime'
+                    # 使用 .get(key, default) 避免因 key 不存在而出錯
+                    episode_lines = last_info.get('removed_lines', episode_lines)
+                    episode_lifetime = last_info.get('lifetime', episode_lifetime)
+                    # done 也是列表，取第一個元素
+                    done = done[0]
+
+                # --- 一局遊戲結束後記錄統計數據 ---
+                write_log(f"   評估 Episode {i+1}: Reward={episode_reward:.2f}, Lines={episode_lines}, Steps={episode_lifetime}")
+                total_rewards.append(episode_reward)
+                total_lines.append(episode_lines)
+                total_lifetimes.append(episode_lifetime)
+                # 如果是第一局，儲存收集到的幀
+                if i == 0: all_frames = frames
+
+            # --- 計算並顯示平均評估結果 ---
+            write_log(f"--- 評估結果 ({num_eval_episodes} episodes) ---")
+            mean_reward = np.mean(total_rewards) if total_rewards else 0
+            std_reward = np.std(total_rewards) if total_rewards else 0
+            mean_lines = np.mean(total_lines) if total_lines else 0
+            std_lines = np.std(total_lines) if total_lines else 0
+            mean_lifetime = np.mean(total_lifetimes) if total_lifetimes else 0
+            std_lifetime = np.std(total_lifetimes) if total_lifetimes else 0
+
+            write_log(f"   平均 Reward: {mean_reward:.2f} +/- {std_reward:.2f}")
+            write_log(f"   平均 Lines: {mean_lines:.2f} +/- {std_lines:.2f}")
+            write_log(f"   平均 Steps: {mean_lifetime:.2f} +/- {std_lifetime:.2f}")
+
+            # --- 將評估結果記錄到 Wandb ---
+            if wandb_enabled:
+                wandb.log({
+                    "eval/mean_reward": mean_reward, "eval/std_reward": std_reward,
+                    "eval/mean_lines": mean_lines, "eval/std_lines": std_lines,
+                    "eval/mean_lifetime": mean_lifetime, "eval/std_lifetime": std_lifetime,
+                })
+
+            # --- 生成並儲存回放 GIF (從第一局評估) ---
+            if all_frames: # 確保有收集到幀
+                gif_path = f'/kaggle/working/replay_eval_{run_id}.gif'
+                write_log(f"💾 正在儲存評估回放 GIF 至 {gif_path}...")
+                try:
+                    # 使用 imageio 將幀列表儲存為 GIF
+                    # 確保幀是 uint8 型態
+                    imageio.mimsave(gif_path, [np.array(frame).astype(np.uint8) for frame in all_frames], fps=15, loop=0)
+                    write_log("   GIF 儲存成功.")
+                    display(FileLink(gif_path)) # 顯示下載連結
+                    # 如果 Wandb 啟用，將 GIF 作為影片上傳
+                    if wandb_enabled: wandb.log({"eval/replay": wandb.Video(gif_path, fps=15, format="gif")})
+                except Exception as e: write_log(f"   ❌ 儲存 GIF 時發生錯誤: {e}")
+            else: write_log("   ⚠️ 未能儲存 GIF (沒有收集到幀).")
+
+            # --- 儲存評估結果到 CSV 檔案 ---
+            csv_filename = f'tetris_evaluation_scores_{run_id}.csv'
+            csv_path = os.path.join("/kaggle/working", csv_filename)
+            try:
+                with open(csv_path, 'w') as fs:
+                    fs.write('episode_id,removed_lines,played_steps,reward\n') # 寫入標頭
+                    # 記錄第一局的詳細數據 (如果存在)
+                    if total_lines:
+                        fs.write(f'eval_0,{total_lines[0]},{total_lifetimes[0]},{total_rewards[0]:.2f}\n')
+                    # 記錄平均數據
+                    fs.write(f'eval_avg,{mean_lines:.2f},{mean_lifetime:.2f},{mean_reward:.2f}\n')
+                write_log(f"✅ 評估分數 CSV 已儲存: {csv_path}")
+                display(FileLink(csv_path)) # 顯示下載連結
+                if wandb_enabled: wandb.save(csv_path) # 上傳 CSV 到 Wandb
+            except Exception as e: write_log(f"   ❌ 儲存 CSV 時發生錯誤: {e}")
+
+        except Exception as eval_e: # 捕捉評估迴圈中的其他錯誤
+            write_log(f"❌ 評估迴圈中發生錯誤: {eval_e}", exc_info=True)
+
+        finally:
+             # 無論評估迴圈是否成功，都確保關閉評估環境
+             if eval_env:
+                 eval_env.close()
+                 write_log("   評估環境已關閉.")
+
+# --- 清理 (Cleanup) ---
+write_log("🧹 清理環境...")
+# 關閉訓練環境 (如果它存在)
+if 'train_env' in locals() and train_env:
+    train_env.close()
+    write_log("   訓練環境已關閉.")
+# 關閉 Java Server 進程 (如果它還在運行)
+if java_process and java_process.poll() is None: # .poll() is None 表示進程仍在運行
+     write_log("   正在終止 Java server process...")
+     java_process.terminate() # 嘗試正常終止
+     try:
+         java_process.wait(timeout=5) # 等待最多 5 秒讓其結束
+         write_log("   Java server process 已終止.")
+     except subprocess.TimeoutExpired: # 如果超時
+         write_log("   Java server 未能在 5 秒內終止, 強制結束...")
+         java_process.kill() # 強制結束
+         write_log("   Java server process 已強制結束.")
+elif java_process and java_process.poll() is not None: # 如果進程已結束
+     write_log("   Java server process 已自行結束.")
+else: # 如果一開始就沒成功啟動
+     write_log("   Java server process 未啟動或已關閉.")
+
+
+# --- 結束 Wandb Run ---
+# 僅在 Wandb 啟用且訓練未在早期崩潰時執行
+if run:
+    if training_successful: # 如果訓練正常完成
+         run.finish()
+         write_log("✨ Wandb run finished.")
+    else: # 如果訓練中途出錯
+         # 檢查 run 是否仍在運行 (可能在錯誤處理中已被結束)
+         if run.is_running:
+              run.finish(exit_code=1) # 確保將 run 標記為失敗
+         write_log("✨ Wandb run finished (marked as failed due to error).")
+
+write_log("🏁 腳本執行完畢.")
