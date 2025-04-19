@@ -1,1212 +1,1316 @@
-
 # -*- coding: utf-8 -*-
-# Complete Training Script with Phased Learning and Auto-Drop Check (v4 - DQN + Reward Shaping)
-
-# <<< Standard Libraries >>>
 import numpy as np
 import socket
 import cv2
+# import matplotlib.pyplot as plt # Matplotlib not strictly needed for core logic
 import subprocess
 import os
 import shutil
 import glob
-import imageio # Keep for potential GIF generation
-import time
-import traceback
-import sys # Potentially useful for flushing output
-
-# <<< Machine Learning Libraries >>>
+import imageio
 import gymnasium as gym
 from gymnasium import spaces
-from stable_baselines3 import DQN # Changed from PPO to DQN
+# from stable_baselines3.common.env_checker import check_env # Not used on VecEnv
+from stable_baselines3 import DQN
+# from stable_baselines3.common.env_util import make_vec_env # Not used
 from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack, DummyVecEnv
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.monitor import Monitor # Import Monitor explicitly
+from IPython.display import FileLink, display # Image not used directly
+# from stable_baselines3.common.callbacks import BaseCallback # Replaced by WandbCallback
 import torch
-from stable_baselines3.common.buffers import ReplayBuffer # DQN uses ReplayBuffer
-
-# <<< Visualization/Interaction (Optional but included from original) >>>
-try:
-    from IPython.display import FileLink, display
-    ipython_available = True
-except ImportError:
-    ipython_available = False
-    # Define dummy functions if not in IPython
-    def display(x): pass
-    def FileLink(x): return x
-
-try:
-    import pygame
-    pygame_available = True
-except ImportError:
-    pygame_available = False
-    print("Warning: Pygame module not found. Human rendering disabled.")
+import time
+import pygame # Added for rendering in TetrisEnv
+# from stable_baselines3 import PPO # PPO imported but not used, can be removed
 
 # --- Wandb Setup ---
-try:
+import os
+import wandb
+# Check if running in a Kaggle environment to use secrets
+if 'KAGGLE_USERNAME' in os.environ:
     from kaggle_secrets import UserSecretsClient
-    secrets_available = True
-except ImportError:
-    secrets_available = False
-    print("Kaggle secrets not available.")
+    kaggle_env = True
+else:
+    kaggle_env = False
+    print("Not running in a Kaggle environment. Skipping Kaggle Secrets.")
 
-try:
-    import wandb
-    from wandb import Settings # Import Settings here
-    from wandb.integration.sb3 import WandbCallback
-    wandb_module_available = True
-except ImportError:
-    wandb_module_available = False
-    print("Wandb module not found. Logging to Wandb disabled.")
-    # Dummy callback with proper __init__ for compatibility
-    class WandbCallback(BaseCallback):
-        """ Dummy WandbCallback to prevent errors when wandb is not installed """
-        def __init__(self, *args, **kwargs):
-            # Only accept 'verbose' from kwargs to pass to BaseCallback
-            allowed_kwargs = {k: v for k, v in kwargs.items() if k in ['verbose']}
-            super().__init__(**allowed_kwargs)
-            # Initialize any attributes expected by SB3 during callback usage
-            self.model_save_path = None # Example attribute
-            self.gradient_save_freq = 0 # Example attribute
-            self.model_save_freq = 0 # Example attribute
-            self.log_interval = -1 # Example attribute
 
-        def _init_callback(self) -> None:
-            """ Initializes the callback """
-            pass # No initialization needed for dummy
-
-        def _on_step(self)->bool:
-            """ Called on each step, does nothing """
-            return True
-
-        def _on_training_end(self) -> None:
-            """ Called at the end of training, does nothing """
-            pass
+# Import WandbCallback for SB3 integration
+from wandb.integration.sb3 import WandbCallback
 
 # --- Configuration ---
-STUDENT_ID = "113598065" # <<< SET YOUR STUDENT ID
-TOTAL_RUNTIME_ID = f"dqn_3phase_shaped_{STUDENT_ID}_{int(time.time())}" # Add "shaped" to ID
+# Set your student ID here for filenames
+STUDENT_ID = "YOUR_STUDENT_ID" # <<<<<<<<<<< 請修改為你的學號
+# Set total training steps
+TOTAL_TIMESTEPS = 2500000 # Adjust as needed (e.g., 1M, 2M, 5M) - Increased for potentially better results
 
-# Define Server Constants (Used by Auto-drop Check and Env)
-SERVER_IP = "127.0.0.1"
-SERVER_PORT = 10612
-CMD_START = b"start\n"
-CMD_MOVE_LEFT = b"move -1\n"
-CMD_MOVE_RIGHT = b"move 1\n"
-CMD_ROTATE_LEFT = b"rotate 0\n" # Assuming rotate 0 is left/counter-clockwise
-CMD_ROTATE_RIGHT = b"rotate 1\n" # Assuming rotate 1 is right/clockwise
-CMD_DROP = b"drop\n"
-
-
-# ========================= PHASE 1 CONFIG (DQN + Shaping) =========================
-# Focus: Basic survival, line clearing without drop. High exploration. Added Height Decrease Reward.
-PHASE_1_NAME = "Phase1_DQN_Shaped_ClearLines_NoDrop"
-PHASE_1_TIMESTEPS = 800000 # Example: Shorter initial phase for DQN
-config_p1 = {
-    "phase_name": PHASE_1_NAME, "total_timesteps": PHASE_1_TIMESTEPS, "env_id": f"TetrisEnv-v1-{PHASE_1_NAME}",
-    "policy_type": "CnnPolicy", "n_stack": 4, "student_id": STUDENT_ID,
-    # DQN Specific Hyperparameters
-    "learning_rate": 5e-4,       # Slightly higher initial LR
-    "buffer_size": 100000,       # Smaller buffer for faster initial learning
-    "learning_starts": 10000,    # Start learning after 10k steps
-    "batch_size": 64,            # Larger batch size
-    "tau": 1.0,                  # Standard Tau for DQN
-    "gamma": 0.99,               # Discount factor
-    "train_freq": (4, "step"),   # Train every 4 steps
-    "gradient_steps": 1,         # Train 1 gradient step per train_freq
-    "target_update_interval": 1000, # Update target network less frequently initially
-    "exploration_fraction": 0.8, # Explore for 80% of phase 1 timesteps
-    "exploration_final_eps": 0.1,# Higher final epsilon for continued exploration
-    # --- Reward Coefficients (Shaped) ---
-    "reward_line_clear_coeff": 600.0,
-    "reward_height_decrease_coeff": 0.1, # <<< NEW: Small reward for dropping piece lower
-    "penalty_height_increase_coeff": 0.5, # Low penalty for stacking initially
-    "penalty_hole_increase_coeff": 1.0,   # Low penalty for holes initially
-    "penalty_step_coeff": 0.0,            # No step penalty (height decrease reward provides incentive)
-    "penalty_game_over_start_coeff": 20.0, # Fixed GO penalty in this phase
-    "penalty_game_over_end_coeff": 20.0,
-    "curriculum_anneal_fraction": 0.0,    # No annealing for GO penalty in P1
-    "line_clear_multipliers": {1: 1.0, 2: 3.0, 3: 5.0, 4: 8.0}, # Basic line multipliers
-    # Environment Setting
-    "remove_drop_action": True # <<< KEY: True means 4 actions, requires auto-drop check
-}
-
-# ========================= PHASE 2 CONFIG (DQN + Shaping) =========================
-# Focus: Introduce Drop, Anneal Exploration, Increase GO Penalty, Increase Stacking Penalties
-PHASE_2_NAME = "Phase2_DQN_Shaped_AddDrop_AnnealExplore_AddGO"
-PHASE_2_TIMESTEPS = 1200000 # Longer phase to learn drop and penalties
-config_p2 = {
-    "phase_name": PHASE_2_NAME, "total_timesteps": PHASE_2_TIMESTEPS, "env_id": f"TetrisEnv-v1-{PHASE_2_NAME}",
-    "policy_type": "CnnPolicy", "n_stack": 4, "student_id": STUDENT_ID,
-    # DQN Specific Hyperparameters (Finetuning)
-    "learning_rate": 1e-4,       # Lower LR for finetuning
-    "buffer_size": 400000,       # Increase buffer size
-    "learning_starts": 1000,     # Assume model already learned basic interaction
-    "batch_size": 32,            # Standard batch size
-    "tau": 1.0,
-    "gamma": 0.99,
-    "train_freq": (1, "step"),   # Train more frequently
-    "gradient_steps": 1,
-    "target_update_interval": 5000, # Update target network more standardly
-    "exploration_fraction": 0.3, # Anneal exploration over 30% of P2 steps
-    "exploration_final_eps": 0.02,# Lower final epsilon
-    # --- Reward Coefficients (Shaped) ---
-    "reward_line_clear_coeff": 650.0, # Slightly increase line reward
-    "reward_height_decrease_coeff": 0.15, # <<< Keep rewarding height decrease
-    "penalty_height_increase_coeff": 2.0, # Start penalizing height more
-    "penalty_hole_increase_coeff": 5.0,   # Start penalizing holes more
-    "penalty_step_coeff": 0.0,
-    "penalty_game_over_start_coeff": config_p1["penalty_game_over_end_coeff"], # Start where P1 ended
-    "penalty_game_over_end_coeff": 100.0, # Increase final GO penalty significantly
-    "curriculum_anneal_fraction": 0.6,    # Anneal GO penalty over 60% of P2 steps
-    "line_clear_multipliers": {1: 1.0, 2: 4.0, 3: 9.0, 4: 16.0}, # <<< Quadratic-like bonus
-    # Environment Setting
-    "remove_drop_action": False # <<< KEY: False means 5 actions, includes DROP
-}
-
-# ========================= PHASE 3 CONFIG (DQN + Shaping) =========================
-# Focus: Final Finetuning, Low Exploration, Strong Penalties
-PHASE_3_NAME = "Phase3_DQN_Shaped_AddStackPenalty_LowExplore"
-PHASE_3_TIMESTEPS = 800000 # Final tuning phase
-config_p3 = {
-    "phase_name": PHASE_3_NAME, "total_timesteps": PHASE_3_TIMESTEPS, "env_id": f"TetrisEnv-v1-{PHASE_3_NAME}",
-    "policy_type": "CnnPolicy", "n_stack": 4, "student_id": STUDENT_ID,
-    # DQN Specific Hyperparameters (Final Polish)
-    "learning_rate": 5e-5,       # Very low LR
-    "buffer_size": 500000,       # Keep large buffer
-    "learning_starts": 1000,
-    "batch_size": 32,
-    "tau": 1.0,
-    "gamma": 0.99,
-    "train_freq": (1, "step"),
-    "gradient_steps": 1,
-    "target_update_interval": 10000,# Update target less frequently for stability
-    "exploration_fraction": 0.05, # Very short final exploration anneal
-    "exploration_final_eps": 0.01,# Very low final epsilon (almost deterministic)
-    # --- Reward Coefficients (Shaped) ---
-    "reward_line_clear_coeff": 700.0, # Maximize line clear reward
-    "reward_height_decrease_coeff": 0.2, # <<< Slightly increase height decrease reward
-    "penalty_height_increase_coeff": 7.5, # Strong height penalty (from original DQN script)
-    "penalty_hole_increase_coeff": 12.5,  # Strong hole penalty (from original DQN script)
-    "penalty_step_coeff": 0.0,
-    "penalty_game_over_start_coeff": config_p2["penalty_game_over_end_coeff"], # Fixed high GO penalty
-    "penalty_game_over_end_coeff": config_p2["penalty_game_over_end_coeff"],
-    "curriculum_anneal_fraction": 0.0,    # No annealing for GO penalty in P3
-    "line_clear_multipliers": {1: 1.0, 2: 4.0, 3: 9.0, 4: 25.0}, # <<< Strong Tetris bonus
-    # Environment Setting
-    "remove_drop_action": False # <<< KEY: False means 5 actions
-}
-
-# --- Wandb Login ---
+# --- Wandb Login and Initialization ---
 wandb_enabled = False
-WANDB_API_KEY = None
-if wandb_module_available:
-    try:
-        # Try Kaggle secrets first
-        if secrets_available:
-            print("Attempting to load WANDB_API_KEY from Kaggle Secrets...")
-            user_secrets = UserSecretsClient()
-            WANDB_API_KEY = user_secrets.get_secret("WANDB_API_KEY")
-            print("Secret loaded from Kaggle.")
-        # Fallback to environment variable
-        elif "WANDB_API_KEY" in os.environ:
-            print("Attempting to load WANDB_API_KEY from environment variable...")
-            WANDB_API_KEY = os.environ["WANDB_API_KEY"]
-            print("Secret loaded from environment variable.")
-         # Try OS environment variable (if running locally)
-        elif os.getenv("WANDB_API_KEY"):
-             print("Attempting to load WANDB_API_KEY from OS environment...")
-             WANDB_API_KEY = os.getenv("WANDB_API_KEY")
-             print("Secret loaded from OS environment.")
-
-        if WANDB_API_KEY:
-            print(f"Attempting to login to Wandb (key ending with ...{WANDB_API_KEY[-4:]})...")
-            try:
-                # Use a reasonable timeout
-                wandb.login(key=WANDB_API_KEY, timeout=45)
-                wandb_enabled = True
-                print("✅ Wandb login successful.")
-            except Exception as login_e:
-                print(f"Wandb login attempt failed: {login_e}. Running without Wandb logging.")
-                wandb_enabled = False
-                WANDB_API_KEY = None # Clear key on failure
+try:
+    if kaggle_env:
+        user_secrets = UserSecretsClient()
+        WANDB_API_KEY = user_secrets.get_secret("WANDB_API_KEY")
+        os.environ["WANDB_API_KEY"] = WANDB_API_KEY
+        wandb.login()
+        wandb_enabled = True
+    else:
+        # Attempt login directly if not in Kaggle (e.g., local machine with WANDB_API_KEY env var)
+        if os.environ.get("WANDB_API_KEY"):
+             wandb.login()
+             wandb_enabled = True
         else:
-            print("WANDB_API_KEY not found in Kaggle Secrets or environment variables. Running without Wandb logging.")
-
-    except Exception as e:
-        print(f"Wandb setup failed during secret retrieval/login: {e}. Running without Wandb logging.")
-        wandb_enabled = False
-        WANDB_API_KEY = None
-else:
-    print("Wandb module not installed, skipping Wandb setup.")
+             print("WANDB_API_KEY not found in environment variables.")
+             wandb_enabled = False # Explicitly disable if key isn't set outside Kaggle
 
 
-# --- Wandb Init (Overall Run) ---
-run = None
-# Ensure entity is specified if using non-default team/user
-# wandb_entity = "your_wandb_entity" # <<< CHANGE THIS if needed
-wandb_entity = "t113598065-ntut-edu-tw" # <<< Or use the one from the original script
-project_name = f"tetris-phased-training-dqn-shaped-{STUDENT_ID}" # Specify DQN+Shaped in project
+except Exception as e:
+    print(f"Wandb login failed: {e}. Running without Wandb logging.")
+    wandb_enabled = False
+
+
+# Start a wandb run if enabled
+# --- !!! MODIFY HYPERPARAMETERS HERE for Wandb logging if needed !!! ---
+# These values will be used if not overridden by Wandb sweeps
+config = { # Log hyperparameters
+    "policy_type": "CnnPolicy",
+    "total_timesteps": TOTAL_TIMESTEPS,
+    "env_id": "TetrisEnv-v1",
+    "gamma": 0.99,
+    "learning_rate": 2e-4,
+    "buffer_size": 400000,
+    "learning_starts": 10000, # Increased learning_starts slightly
+    "target_update_interval": 1000, # MODIFIED: Reduced target update interval
+    "train_freq": (1, "step"), # Train every step
+    "gradient_steps": 1, # One gradient step per train_freq
+    # --- MODIFIED: Increased exploration duration, slightly higher final eps ---
+    "exploration_fraction": 0.5, # INCREASED exploration duration (e.g., 50% of training steps)
+    "exploration_final_eps": 0.05, # Kept final exploration rate
+    "batch_size": 32,
+    "n_stack": 4,
+    "student_id": STUDENT_ID,
+    # --- MODIFIED: Add reward coeffs to config for tracking AND adjusted values ---
+    # QUADRATIC line clear bonus will be applied IN THE CODE using this coeff as base
+    "reward_line_clear_base_coeff": 150.0, # Base reward for 1 line clear (e.g., 1*150)
+    "penalty_height_increase_coeff": 5.0, # DECREASED penalty for height increase
+    "penalty_hole_increase_coeff": 10.0, # DECREASED penalty for hole increase
+    "penalty_step_coeff": 0.0, # SET TO ZERO - Removed survival penalty
+    "penalty_game_over_coeff": 200.0 # Slightly increased game over penalty
+}
+
+run = None # Initialize run to None
+run_id = f"local_{int(time.time())}" # Default local ID
+
 if wandb_enabled:
     try:
         run = wandb.init(
-            project=project_name,
-            entity=wandb_entity,
-            id=TOTAL_RUNTIME_ID, # Use the defined run ID for resuming
-            name=f"Run_{TOTAL_RUNTIME_ID}", # Descriptive name
-            sync_tensorboard=True, # Capture SB3 TensorBoard logs
-            monitor_gym=True,      # Automatically log Gym env stats
-            save_code=True,        # Save main script to Wandb
-            settings=Settings(init_timeout=180, start_method="thread"), # Increase timeout, use thread start method
-            config={ # Log all phase configs
-                "General": {"StudentID": STUDENT_ID, "RunID": TOTAL_RUNTIME_ID, "Algorithm": "DQN", "RewardShaping": True},
-                "Phase1": config_p1,
-                "Phase2": config_p2,
-                "Phase3": config_p3
-            },
-            resume="allow" # Allow resuming if run ID exists
+            project="tetris-training-improved", # <<<<<<<<<<< 可修改專案名稱
+            entity="YOUR_WANDB_ENTITY", # <<<<<<<<<<< 請修改為你的 Wandb entity (例如你的用戶名)
+            sync_tensorboard=True,
+            monitor_gym=True, # Automatically log gym environment stats
+            save_code=True,
+            config=config # Log hyperparameters from the dictionary
         )
-        print(f"✅ Wandb run initialized/resumed. Run ID: {run.id if run else 'N/A'}")
-        print(f"   View Run: {run.get_url() if run else 'N/A'}")
+        run_id = run.id # Get run ID for saving paths
+        write_log(f"✅ Wandb run initialized: {run.url}")
     except Exception as e:
-        print(f"Wandb init failed: {e}.")
-        wandb_enabled = False
-        run = None # Ensure run is None if init fails
+        write_log(f"❌ Failed to initialize Wandb run: {e}. Running without Wandb logging features.")
+        run = None # Ensure run is None if initialization fails
+        wandb_enabled = False # Disable wandb features
 
 
-# --- Log & File Paths ---
-# Use /kaggle/working/ for Kaggle environments, adapt if running elsewhere
-output_dir = "/kaggle/working/"
-os.makedirs(output_dir, exist_ok=True)
-
-log_path = os.path.join(output_dir, f"tetris_train_log_{TOTAL_RUNTIME_ID}.txt")
-# Temporary paths for intermediate results
-phase1_model_save_path = os.path.join(output_dir, f"{STUDENT_ID}_dqn_{PHASE_1_NAME}_temp_{TOTAL_RUNTIME_ID}.zip")
-phase1_stats_save_path = os.path.join(output_dir, f"vecnormalize_stats_{PHASE_1_NAME}_temp_{TOTAL_RUNTIME_ID}.pkl")
-phase2_model_save_path = os.path.join(output_dir, f"{STUDENT_ID}_dqn_{PHASE_2_NAME}_temp_{TOTAL_RUNTIME_ID}.zip")
-phase2_stats_save_path = os.path.join(output_dir, f"vecnormalize_stats_{PHASE_2_NAME}_temp_{TOTAL_RUNTIME_ID}.pkl")
-# Final paths for Phase 3 results
-phase3_final_model_save_path = os.path.join(output_dir, f"{STUDENT_ID}_dqn_{PHASE_3_NAME}_final_{TOTAL_RUNTIME_ID}.zip")
-phase3_final_stats_save_path = os.path.join(output_dir, f"vecnormalize_stats_{PHASE_3_NAME}_final_{TOTAL_RUNTIME_ID}.pkl")
-
-
-# --- Helper Functions ---
+log_path = f"/kaggle/working/tetris_train_log_{run_id}.txt"
 
 def write_log(message, exc_info=False):
-    """ Writes a message to the log file and prints to console. """
+    """Appends a message to the log file and prints it."""
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     log_message = f"{timestamp} - {message}"
-    print(log_message)
-    sys.stdout.flush() # Ensure message appears immediately in console/notebook output
-    if exc_info:
-        # Get traceback string only if exc_info is True
-        log_message += "\n" + traceback.format_exc()
     try:
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(log_message + "\n")
-    except Exception as e:
-        # Print logging errors to console if file writing fails
-        print(f"{timestamp} - Log write error: {e}")
-        sys.stdout.flush()
+            if exc_info:
+                 import traceback
+                 traceback.print_exc(file=f)
 
-def wait_for_tetris_server(ip=SERVER_IP, port=SERVER_PORT, timeout=60):
-    """ Waits for the Tetris Java server to become available. """
-    write_log(f"⏳ Waiting for Tetris server @ {ip}:{port} (timeout: {timeout}s)...")
-    t_start = time.time()
+    except Exception as e:
+        print(f"Error writing to log file {log_path}: {e}")
+    print(log_message)
+    if exc_info:
+        import traceback
+        traceback.print_exc()
+
+
+def wait_for_tetris_server(ip="127.0.0.1", port=10612, timeout=60):
+    """Waits for the Tetris TCP server to become available."""
+    write_log(f"⏳ 等待 Tetris TCP server 啟動中 ({ip}:{port})...")
+    start_time = time.time()
     while True:
         try:
-            with socket.create_connection((ip, port), timeout=1.0) as s:
+            with socket.create_connection((ip, port), timeout=1.0): # Use create_connection for a more robust check
                 pass # Connection successful
-            write_log("✅ Java server detected and ready.")
-            return True
-        except socket.error:
-            if time.time() - t_start > timeout:
-                write_log(f"❌ Server connection timed out after {timeout} seconds.")
-                return False
-            time.sleep(1.0) # Wait before retrying
+            write_log("✅ Java TCP server 準備完成，連線成功")
+            return True # Indicate success
+        except (ConnectionRefusedError, TimeoutError, OSError) as e:
+            if time.time() - start_time > timeout:
+                write_log(f"❌ 等待 Java TCP server 超時 ({timeout}s): {e}")
+                return False # Indicate failure
+            # write_log(f"    連接失敗 ({e}), 等待重試...") # Too noisy
+            time.sleep(1.0) # Wait a bit longer before retrying
         except Exception as e:
-             write_log(f"❌ Unexpected error while waiting for server: {e}")
-             return False # Treat unexpected errors as failure
+            write_log(f"❌ 等待 Java TCP server 時發生未知錯誤: {e}", exc_info=True)
+            if time.time() - start_time > timeout:
+                 return False
+            time.sleep(1.0)
 
 
-# Global variable for the Java server process - MUST BE DEFINED BEFORE start_java_server
-java_process = None
-
-def start_java_server():
-    """ Starts the Java Tetris server process. """
-    global java_process # Allow modification of the global variable
-    write_log("🚀 Attempting to start Java Tetris server...")
-    # --- !!! ADAPT JAR PATH IF NEEDED !!! ---
-    jar_file = "TetrisTCPserver_v0.6.jar" # Assumes JAR is in the current directory
-
-    # Check if JAR file exists
+# --- Start Java Server ---
+java_process = None # Initialize to None
+try:
+    write_log("🚀 嘗試啟動 Java Tetris server...")
+    jar_file = "TetrisTCPserver_v0.6.jar" # <<<<<<<<<<< 請確認 JAR 檔案名稱及路徑
     if not os.path.exists(jar_file):
-         # Try finding it in a common input directory structure (e.g., Kaggle)
-         alt_path = "/kaggle/input/tetris-server-jar/" + jar_file
-         if os.path.exists(alt_path):
-             jar_file = alt_path
-             write_log(f"  Found JAR file at: {jar_file}")
-         else:
-             write_log(f"❌ CRITICAL: JAR file '{jar_file}' not found in current directory or /kaggle/input/.")
-             return False # Cannot proceed without the server JAR
+         write_log(f"❌ 錯誤: 找不到 JAR 檔案 '{jar_file}'。請確保它在工作目錄中。")
+         raise FileNotFoundError(f"JAR file '{jar_file}' not found.")
 
-    try:
-        # Start the Java process, redirecting stdout/stderr to prevent console clutter
-        java_process = subprocess.Popen(
-            ["java", "-jar", jar_file],
-            stdout=subprocess.DEVNULL, # Redirect standard output
-            stderr=subprocess.DEVNULL  # Redirect standard error
-        )
-        write_log(f"✅ Java server process initiated (PID: {java_process.pid})")
+    # Start process, redirect stdout/stderr to DEVNULL to keep console clean
+    # shell=True might be needed on some OS/environments, but can be risky
+    # Consider removing shell=True if not necessary
+    java_process = subprocess.Popen(
+        ["java", "-jar", jar_file],
+        stdout=subprocess.DEVNULL, # Hide server stdout
+        stderr=subprocess.DEVNULL, # Hide server stderr
+        # shell=True # Optional: use shell if needed for path resolution
+    )
+    write_log(f"✅ Java server process 啟動 (PID: {java_process.pid})")
+    if not wait_for_tetris_server():
+        raise TimeoutError("Java server did not become available within the timeout.") # Raise specific error
 
-        # Wait for the server to become available
-        if not wait_for_tetris_server():
-            write_log("❌ Java server process started but did not become available.")
-            # Attempt to terminate the unresponsive process
-            if java_process and java_process.poll() is None:
-                 java_process.terminate()
-                 try: java_process.wait(timeout=2)
-                 except subprocess.TimeoutExpired: java_process.kill()
-            return False # Indicate failure
+except Exception as e:
+    write_log(f"❌ 啟動或等待 Java server 時發生錯誤: {e}", exc_info=True)
+    # Attempt to terminate if process started but failed connection
+    if java_process and java_process.poll() is None:
+         write_log("    嘗試終止未成功連接的 Java server process...")
+         java_process.terminate()
+         try:
+             java_process.wait(timeout=5)
+         except subprocess.TimeoutExpired:
+             write_log("    Java server 未能在 5 秒內終止, 強制結束...")
+             java_process.kill()
+    # If wandb is enabled and running, finish it with an error code
+    if run and hasattr(run, 'is_running') and run.is_running:
+         run.finish(exit_code=1, quiet=True)
+    raise # Re-raise the exception to stop the script
 
-        return True # Indicate successful start and availability
-
-    except FileNotFoundError:
-        write_log("❌ Error: 'java' command not found. Is Java installed and in the system PATH?")
-        return False
-    except Exception as e:
-        write_log(f"❌ An unexpected error occurred during Java server startup: {e}", True)
-        # Ensure process termination if startup fails critically
-        if java_process and java_process.poll() is None:
-            java_process.terminate()
-            try: java_process.wait(timeout=2)
-            except subprocess.TimeoutExpired: java_process.kill()
-        return False # Indicate failure
-
-
-def check_server_autodrop(ip=SERVER_IP, port=SERVER_PORT, steps_to_check=30, non_drop_cmds=[CMD_MOVE_LEFT, CMD_ROTATE_RIGHT]):
-    """
-    Checks if the server seems to have an auto-drop mechanism. [Unchanged]
-    """
-    write_log("🧪 Attempting to check server for auto-drop mechanism...")
-    test_sock = None
-    check_successful = False
-    try:
-        # --- Internal Socket Helpers ---
-        def receive_data(sock, size):
-            data = b""
-            sock.settimeout(6.0)
-            t_start_recv = time.time()
-            while len(data) < size:
-                if time.time() - t_start_recv > 6.0:
-                    raise socket.timeout(f"Timeout receiving {size} bytes (got {len(data)})")
-                try:
-                    chunk = sock.recv(size - len(data))
-                    if not chunk: raise ConnectionAbortedError("Socket broken during check receive")
-                    data += chunk
-                except socket.timeout: continue
-                except socket.error as recv_e: raise ConnectionAbortedError(f"Socket error during check receive: {recv_e}")
-            return data
-        def receive_int(sock): return int.from_bytes(receive_data(sock, 4), 'big')
-        def receive_byte(sock): return receive_data(sock, 1)
-        # -----------------------------
-        test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test_sock.settimeout(5.0)
-        test_sock.connect((ip, port))
-        write_log("  Check: Connected to server.")
-        test_sock.sendall(CMD_START)
-        write_log("  Check: Sent START command.")
-        initial_height = -1
-        try:
-            is_go_byte = receive_byte(test_sock)
-            lines = receive_int(test_sock)
-            height = receive_int(test_sock)
-            holes = receive_int(test_sock)
-            img_size = receive_int(test_sock)
-            if 0 < img_size <= 2000000: receive_data(test_sock, img_size)
-            else: write_log(f"  Check: Warning - Invalid initial image size {img_size}")
-            initial_height = height
-            is_game_over = (is_go_byte == b'\x01')
-            write_log(f"  Check: Initial state received (H={height}, L={lines}, Game Over={is_game_over})")
-            if is_game_over: write_log("  Check: Warning - Game started in 'Game Over' state?")
-        except (ConnectionAbortedError, ConnectionError, socket.timeout, ValueError) as e:
-            write_log(f"⚠️ Check: Error receiving initial state: {e}. Cannot reliably verify auto-drop.")
-            return False
-        except Exception as e:
-            write_log(f"❌ Check: Unexpected error receiving initial state: {e}", True)
-            return False
-        height_changed_without_drop = False
-        for i in range(steps_to_check):
-            command = non_drop_cmds[i % len(non_drop_cmds)]
-            test_sock.sendall(command)
-            time.sleep(0.2)
-            try:
-                is_go_byte = receive_byte(test_sock)
-                lines = receive_int(test_sock)
-                height = receive_int(test_sock)
-                holes = receive_int(test_sock)
-                img_size = receive_int(test_sock)
-                if 0 < img_size <= 2000000: receive_data(test_sock, img_size)
-                else: write_log(f"  Check Step {i+1}: Warning - Invalid image size {img_size}")
-                height_increased = height > initial_height + 1
-                game_ended_unexpectedly = (is_go_byte == b'\x01')
-                if (height_increased or game_ended_unexpectedly):
-                    log_reason = "Height increased" if height_increased else "Game ended"
-                    write_log(f"  Check Step {i+1}: {log_reason} (H:{initial_height}->{height}, GO:{game_ended_unexpectedly}) without DROP command. Auto-drop likely present.")
-                    height_changed_without_drop = True
-                    break
-            except (ConnectionAbortedError, ConnectionError, socket.timeout, ValueError) as e:
-                write_log(f"⚠️ Check Step {i+1}: Error receiving state: {e}. Stopping check.")
-                return False
-            except Exception as e:
-                write_log(f"❌ Check Step {i+1}: Unexpected error receiving state: {e}", True)
-                return False
-        check_successful = True
-        if height_changed_without_drop:
-            write_log("✅ Auto-drop check PASSED (Evidence of state change without DROP command found).")
-            return True
-        else:
-            write_log(f"⚠️ Auto-drop check FAILED? (No clear evidence of auto-drop found in {steps_to_check} steps). Phase 1 (4 actions) might not work correctly.")
-            return False
-    except (ConnectionAbortedError, ConnectionError, socket.timeout) as e:
-        write_log(f"❌ Error during auto-drop check connection/setup: {e}")
-        return False
-    except Exception as e:
-        write_log(f"❌ Unexpected error during auto-drop check: {e}", True)
-        return False
-    finally:
-        if test_sock:
-            try: test_sock.close()
-            except socket.error: pass
-        if not check_successful: write_log("  Check: Auto-drop check did not complete successfully due to errors.")
+# --- Check GPU ---
+if torch.cuda.is_available():
+    device_name = torch.cuda.get_device_name(0)
+    write_log(f"✅ PyTorch is using GPU: {device_name}")
+    device = "cuda"
+else:
+    write_log("⚠️ PyTorch is using CPU. Training will be significantly slower.")
+    device = "cpu"
 
 
-# ==============================================================================
-# === Tetris Environment Class Definition (Adapted for Reward Shaping) ===
-# ==============================================================================
+# ----------------------------
+# 定義 Tetris 環境 (採用老師的格式, 結合獎勵機制概念)
+# ----------------------------
 class TetrisEnv(gym.Env):
-    """ Custom Gym environment for Tetris with phased config and reward shaping """
+    """Custom Environment for Tetris that interacts with a Java TCP server."""
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
-    N_DISCRETE_ACTIONS_NO_DROP = 4
-    N_DISCRETE_ACTIONS_WITH_DROP = 5
-    IMG_HEIGHT = 200
-    IMG_WIDTH = 100
-    IMG_CHANNELS = 3
-    RESIZED_DIM = 84
+    N_DISCRETE_ACTIONS = 5
+    IMG_HEIGHT = 200 # Original server image height
+    IMG_WIDTH = 100  # Original server image width
+    IMG_CHANNELS = 3 # Original server image channels (BGR)
+    RESIZED_DIM = 84 # Target dimension for observation space
 
-    def __init__(self, host_ip=SERVER_IP, host_port=SERVER_PORT, render_mode=None, env_config=None):
+    def __init__(self, host_ip="127.0.0.1", host_port=10612, render_mode=None):
         super().__init__()
         self.render_mode = render_mode
-        current_config = env_config
-        if current_config is None: raise ValueError("env_config must be provided to TetrisEnv")
-
+        self.action_space = spaces.Discrete(self.N_DISCRETE_ACTIONS)
+        # Observation space is grayscale, channel first
+        self.observation_space = spaces.Box(
+            low=0, high=255,
+            shape=(1, self.RESIZED_DIM, self.RESIZED_DIM), # (Channels, Height, Width) - Grayscale, channel first
+            dtype=np.uint8
+        )
         self.server_ip = host_ip
         self.server_port = host_port
-        self.config_remove_drop = current_config.get("remove_drop_action", False)
-
-        # Define action space and command mapping based on config
-        if self.config_remove_drop:
-            self.action_space = spaces.Discrete(self.N_DISCRETE_ACTIONS_NO_DROP)
-            self.command_map = {0: CMD_MOVE_LEFT, 1: CMD_MOVE_RIGHT, 2: CMD_ROTATE_LEFT, 3: CMD_ROTATE_RIGHT}
-            self._log_prefix = "[Env NoDrop]"
-        else:
-            self.action_space = spaces.Discrete(self.N_DISCRETE_ACTIONS_WITH_DROP)
-            self.command_map = {0: CMD_MOVE_LEFT, 1: CMD_MOVE_RIGHT, 2: CMD_ROTATE_LEFT, 3: CMD_ROTATE_RIGHT, 4: CMD_DROP}
-            self._log_prefix = "[Env Drop]"
-
-        # Define observation space (single grayscale image)
-        self.observation_space = spaces.Box(low=0, high=255, shape=(1, self.RESIZED_DIM, self.RESIZED_DIM), dtype=np.uint8)
-
         self.client_sock = None
-        try: self._connect_socket()
-        except ConnectionError as e:
-             write_log(f"{self._log_prefix} ❌ Initial connection failed during __init__: {e}")
-             raise ConnectionError(f"Failed to connect to Tetris server ({self.server_ip}:{self.server_port}) during environment initialization.") from e
+        # Connect in init - added retry logic here too
+        self._connect_socket(retries=5, delay=1.0)
 
-        # Internal state variables
-        self.current_cumulative_lines = 0
+
+        # Reward shaping & statistics variables
+        self.lines_removed = 0
         self.current_height = 0
         self.current_holes = 0
         self.lifetime = 0
+        # Store last observation in case of error during receive
         self.last_observation = np.zeros(self.observation_space.shape, dtype=np.uint8)
-        self.last_raw_render_frame = None
+        # Store last raw frame for rendering
+        self.last_raw_render_frame = np.zeros((self.RESIZED_DIM, self.RESIZED_DIM, 3), dtype=np.uint8)
 
-        # Load reward parameters from the provided configuration
-        self.reward_line_clear_coeff = current_config["reward_line_clear_coeff"]
-        self.reward_height_decrease_coeff = current_config.get("reward_height_decrease_coeff", 0.0) # <<< LOAD NEW COEFF
-        self.penalty_height_increase_coeff = current_config["penalty_height_increase_coeff"]
-        self.penalty_hole_increase_coeff = current_config["penalty_hole_increase_coeff"]
-        self.penalty_step_coeff = current_config["penalty_step_coeff"]
-        self.line_clear_multipliers = current_config["line_clear_multipliers"]
-        self.penalty_game_over_start_coeff = current_config["penalty_game_over_start_coeff"]
-        self.penalty_game_over_end_coeff = current_config["penalty_game_over_end_coeff"]
-        self.current_go_penalty = self.penalty_game_over_start_coeff
-        self.current_phase_name = current_config.get('phase_name', 'UnknownPhase')
 
-        # Log initialization details
-        write_log(f"{self._log_prefix} Initialized Phase: {self.current_phase_name}")
-        write_log(f"{self._log_prefix} Action Space Size: {self.action_space.n}")
-        write_log(f"{self._log_prefix} Rewards: LC_Base={self.reward_line_clear_coeff:.2f}, H_Decr={self.reward_height_decrease_coeff:.2f}, Step={self.penalty_step_coeff:.3f}, GO_Start={self.current_go_penalty:.2f}, GO_End={self.penalty_game_over_end_coeff:.2f}") # Log new coeff
-        write_log(f"{self._log_prefix} Penalties: H_Incr={self.penalty_height_increase_coeff:.2f}, Hole={self.penalty_hole_increase_coeff:.2f}")
-        write_log(f"{self._log_prefix} Line Multipliers: {self.line_clear_multipliers}")
+        # --- !!! MODIFIED: REWARD SHAPING COEFFICIENTS !!! ---
+        # Retrieve from Wandb config if available, otherwise use defaults from global config dict
+        # Using .get() with default ensures it works even if config changes
+        current_config = run.config if run else config # Use global config if no run
+        self.reward_line_clear_base_coeff = current_config.get("reward_line_clear_base_coeff", 150.0) # Base reward for 1 line
+        self.penalty_height_increase_coeff = current_config.get("penalty_height_increase_coeff", 5.0) # Penalty per unit height increase
+        self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 10.0) # Penalty per unit hole increase
+        self.penalty_step_coeff = current_config.get("penalty_step_coeff", 0.0) # Penalty per step (should be 0.0)
+        self.penalty_game_over_coeff = current_config.get("penalty_game_over_coeff", 200.0) # Penalty for game over
 
-        # Pygame related
+        write_log(f"TetrisEnv initialized with Reward Coeffs: LineBase={self.reward_line_clear_base_coeff}, H_Inc={self.penalty_height_increase_coeff}, O_Inc={self.penalty_hole_increase_coeff}, Step={self.penalty_step_coeff}, GO={self.penalty_game_over_coeff}")
+
+
+        # For rendering
         self.window_surface = None
         self.clock = None
-        self.is_pygame_initialized = False
-        if not pygame_available and self.render_mode == "human":
-            write_log("⚠️ Pygame not available, disabling human rendering.")
-            self.render_mode = None
+        self.is_pygame_initialized = False # Track Pygame init state
+        # Flag to prevent Wandb log error spam
         self._wandb_log_error_reported = False
+        # Flag for render mode issue log
+        self._eval_render_mode_error_reported = False
+        self._eval_render_error_reported = False
+        self._eval_render_error_reported_access = False
 
-    def set_game_over_penalty(self, new_penalty_value):
-        self.current_go_penalty = new_penalty_value
 
     def _initialize_pygame(self):
-        # [Unchanged from previous version]
-        if self.render_mode == "human" and pygame_available and not self.is_pygame_initialized:
+        """Initializes Pygame if not already done."""
+        # Only initialize if render_mode is human and not already initialized
+        if self.render_mode == "human" and not self.is_pygame_initialized:
             try:
+                import pygame
                 pygame.init()
                 pygame.display.init()
-                self.window_surface = pygame.display.set_mode((self.RESIZED_DIM * 5, self.RESIZED_DIM * 5))
-                pygame.display.set_caption(f"Tetris Env ({self.server_ip}:{self.server_port}) - Phase: {self.current_phase_name}")
+                # Scale window for better visibility (e.g., 4x the resized dimension)
+                window_width = self.RESIZED_DIM * 4
+                window_height = self.RESIZED_DIM * 4
+                self.window_surface = pygame.display.set_mode((window_width, window_height))
+                pygame.display.set_caption(f"Tetris Env ({self.server_ip}:{self.server_port})")
                 self.clock = pygame.time.Clock()
                 self.is_pygame_initialized = True
+                write_log("    Pygame initialized for rendering (human mode).")
+            except ImportError:
+                write_log("⚠️ Pygame not installed, cannot use 'human' render mode.")
+                self.render_mode = None # Disable human rendering
             except Exception as e:
-                write_log(f"⚠️ Pygame initialization error: {e}")
-                self.render_mode = None
-                self.is_pygame_initialized = False
+                write_log(f"⚠️ Error initializing Pygame: {e}")
+                self.render_mode = None # Disable human rendering
 
-    def _connect_socket(self):
-        # [Unchanged from previous version]
-        try:
-            if self.client_sock:
-                try: self.client_sock.shutdown(socket.SHUT_RDWR); self.client_sock.close()
-                except socket.error: pass
-                self.client_sock = None
-            self.client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    def _connect_socket(self, retries=1, delay=0.1):
+        """Establishes connection to the game server with retries."""
+        if self.client_sock:
             try:
-                if sys.platform == 'linux':
-                     self.client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
-                     self.client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-                     self.client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-            except (AttributeError, OSError): pass
-            self.client_sock.settimeout(15.0)
-            self.client_sock.connect((self.server_ip, self.server_port))
-            self.client_sock.settimeout(15.0)
-        except socket.error as e:
-            write_log(f"{self._log_prefix} 🔌 Socket connection/setup error: {e}")
-            raise ConnectionError(f"Failed to connect to Tetris server {self.server_ip}:{self.server_port}: {e}")
+                self.client_sock.close()
+            except socket.error:
+                pass # Ignore error on closing
+            self.client_sock = None
+
+        for attempt in range(retries):
+            try:
+                self.client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.client_sock.settimeout(10.0) # Set timeout for connection attempt
+                self.client_sock.connect((self.server_ip, self.server_port))
+                self.client_sock.settimeout(5.0) # Reset to a shorter timeout for subsequent operations
+                # write_log(f"🔌 Socket connected to {self.server_ip}:{self.server_port} on attempt {attempt+1}") # Less verbose
+                return # Connection successful
+
+            except socket.error as e:
+                if attempt < retries - 1:
+                    # write_log(f"    Connection attempt {attempt+1} failed: {e}. Retrying in {delay}s.") # Too noisy
+                    time.sleep(delay)
+                else:
+                    write_log(f"❌ Final socket connection attempt failed after {retries} retries: {e}", exc_info=True)
+                    self.client_sock = None # Ensure sock is None on failure
+                    raise ConnectionError(f"Failed to connect to Tetris server at {self.server_ip}:{self.server_port}") from e
+            except Exception as e:
+                write_log(f"❌ Unexpected error during connection attempt {attempt+1}: {e}", exc_info=True)
+                if attempt < retries - 1:
+                     time.sleep(delay)
+                else:
+                    self.client_sock = None
+                    raise ConnectionError(f"Unexpected error connecting to Tetris server: {e}") from e
+
 
     def _send_command(self, command: bytes):
-        # [Unchanged from previous version]
+        """Sends a command to the server, handles potential errors."""
         if not self.client_sock:
-            try: self._connect_socket()
-            except ConnectionError: raise ConnectionError(f"{self._log_prefix} Socket not connected/reconnect failed for send.")
-        try:
-            bytes_sent = self.client_sock.sendall(command)
-            if bytes_sent is not None: write_log(f"⚠️ {self._log_prefix} sendall() unexpected return: {bytes_sent}")
-        except socket.timeout: raise ConnectionAbortedError(f"Send command timed out: {command.strip()}")
-        except socket.error as e:
-            if self.client_sock: try: self.client_sock.close(); self.client_sock = None; except socket.error: pass
-            raise ConnectionAbortedError(f"Socket error sending command {command.strip()}: {e}")
-        except Exception as e: raise ConnectionAbortedError(f"Unexpected error sending command: {e}")
+             # Attempt to reconnect if socket is unexpectedly closed
+             write_log("⚠️ Socket not connected during send. Attempting reconnect...")
+             try:
+                 self._connect_socket(retries=3, delay=0.5)
+                 write_log("    Reconnect successful.")
+             except ConnectionError as e:
+                 write_log(f"    Reconnect failed: {e}")
+                 raise ConnectionError("Socket is not connected and reconnect failed. Cannot send command.") from e
 
-    def _receive_data(self, size: int):
-        # [Unchanged from previous version]
+        try:
+            self.client_sock.sendall(command)
+        except socket.timeout:
+            write_log("❌ Socket timeout during send.")
+            self.client_sock = None # Mark socket as bad
+            raise ConnectionAbortedError("Socket timeout during send")
+        except socket.error as e:
+            write_log(f"❌ Socket error during send: {e}")
+            self.client_sock = None # Mark socket as bad
+            raise ConnectionAbortedError(f"Socket error during send: {e}")
+
+    def _receive_data(self, size):
+        """Receives exactly size bytes from the server."""
         if not self.client_sock:
-            try: self._connect_socket()
-            except ConnectionError: raise ConnectionError(f"{self._log_prefix} Socket not connected/reconnect failed for receive.")
+             # Attempt to reconnect if socket is unexpectedly closed
+             write_log("⚠️ Socket not connected during receive. Attempting reconnect...")
+             try:
+                 self._connect_socket(retries=3, delay=0.5)
+                 write_log("    Reconnect successful.")
+             except ConnectionError as e:
+                 write_log(f"    Reconnect failed: {e}")
+                 raise ConnectionError("Socket is not connected and reconnect failed. Cannot receive data.") from e
+
+
         data = b""
-        self.client_sock.settimeout(15.0)
-        t_start = time.time()
-        while len(data) < size:
-            if time.time() - t_start > 15.0: raise socket.timeout(f"Timeout receiving {size} bytes (got {len(data)})")
-            try:
+        try:
+            self.client_sock.settimeout(5.0) # Set timeout for recv (shorter than send)
+            while len(data) < size:
                 chunk = self.client_sock.recv(size - len(data))
                 if not chunk:
-                    if self.client_sock: try: self.client_sock.close(); self.client_sock = None; except socket.error: pass
-                    raise ConnectionAbortedError("Socket connection broken by server.")
+                    write_log("❌ Socket connection broken during receive (received empty chunk).")
+                    self.client_sock = None # Mark socket as bad
+                    raise ConnectionAbortedError("Socket connection broken")
                 data += chunk
-            except socket.timeout: time.sleep(0.01); continue
-            except socket.error as e:
-                if self.client_sock: try: self.client_sock.close(); self.client_sock = None; except socket.error: pass
-                raise ConnectionAbortedError(f"Socket error receiving data: {e}")
-            except Exception as e: raise ConnectionAbortedError(f"Unexpected error receiving data: {e}")
+        except socket.timeout:
+             write_log(f"❌ Socket timeout during receive (expected {size}, got {len(data)}).")
+             self.client_sock = None # Mark socket as bad
+             raise ConnectionAbortedError("Socket timeout during receive")
+        except socket.error as e:
+            write_log(f"❌ Socket error during receive: {e}")
+            self.client_sock = None # Mark socket as bad
+            raise ConnectionAbortedError(f"Socket error during receive: {e}")
+        except Exception as e:
+            write_log(f"❌ Unexpected error during receive: {e}", exc_info=True)
+            self.client_sock = None
+            raise ConnectionAbortedError(f"Unexpected error during receive: {e}")
+
         return data
 
     def get_tetris_server_response(self):
-        # [Unchanged from previous version - image processing and parsing]
+        """Gets state update from the Tetris server via socket."""
         try:
-            term_byte = self._receive_data(1)
-            terminated = (term_byte == b'\x01')
-            lines_cleared = int.from_bytes(self._receive_data(4), 'big')
-            current_height = int.from_bytes(self._receive_data(4), 'big')
-            current_holes = int.from_bytes(self._receive_data(4), 'big')
-            image_size = int.from_bytes(self._receive_data(4), 'big')
-            max_expected_size = self.IMG_HEIGHT * self.IMG_WIDTH * self.IMG_CHANNELS * 2
-            if not 0 < image_size <= max_expected_size:
-                write_log(f"{self._log_prefix} ❌ Invalid image size: {image_size}. Ending ep.")
-                return True, self.current_cumulative_lines, self.current_height, self.current_holes, self.last_observation.copy()
-            img_data = self._receive_data(image_size)
-            nparr = np.frombuffer(img_data, np.uint8)
-            np_image_bgr = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if np_image_bgr is None:
-                write_log(f"{self._log_prefix} ❌ Image decode failed. Ending ep.")
-                return True, self.current_cumulative_lines, self.current_height, self.current_holes, self.last_observation.copy()
-            resized_bgr = cv2.resize(np_image_bgr, (self.RESIZED_DIM, self.RESIZED_DIM), interpolation=cv2.INTER_AREA)
-            self.last_raw_render_frame = resized_bgr.copy()
-            grayscale_obs_frame = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2GRAY)
-            observation = np.expand_dims(grayscale_obs_frame, axis=0).astype(np.uint8)
-            self.last_observation = observation.copy()
-            return terminated, lines_cleared, current_height, current_holes, observation
-        except (ConnectionAbortedError, ConnectionRefusedError, ConnectionResetError, ConnectionError, ValueError, socket.timeout) as e:
-            write_log(f"{self._log_prefix} ❌ Network/Value/Timeout error getting response: {e}. Ending ep.")
-            return True, self.current_cumulative_lines, self.current_height, self.current_holes, self.last_observation.copy()
+            # Read game over byte (1 byte)
+            is_game_over_byte = self._receive_data(1)
+            is_game_over = (is_game_over_byte == b'\x01')
+
+            # Read stats (4 bytes each for lines, height, holes)
+            removed_lines_bytes = self._receive_data(4)
+            removed_lines = int.from_bytes(removed_lines_bytes, 'big')
+
+            height_bytes = self._receive_data(4)
+            height = int.from_bytes(height_bytes, 'big')
+
+            holes_bytes = self._receive_data(4)
+            holes = int.from_bytes(holes_bytes, 'big')
+
+            # Read image size (4 bytes)
+            img_size_bytes = self._receive_data(4)
+            img_size = int.from_bytes(img_size_bytes, 'big')
+
+            # Check image size validity
+            if img_size <= 0 or img_size > 2000000: # Increased max size for safety
+                 write_log(f"❌ Received invalid image size: {img_size}. Aborting receive.")
+                 # Return last known state and signal termination
+                 # Ensure socket is marked bad so subsequent steps fail fast
+                 self.client_sock = None
+                 return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+
+            # Read image data (img_size bytes)
+            img_png = self._receive_data(img_size)
+
+            # Decode and preprocess image
+            nparr = np.frombuffer(img_png, np.uint8)
+            np_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if np_image is None:
+                 write_log("❌ Failed to decode image from server response.")
+                 # Return last known state and signal termination
+                 self.client_sock = None
+                 return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+
+            # Resize and convert to grayscale
+            resized = cv2.resize(np_image, (self.RESIZED_DIM, self.RESIZED_DIM), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            # Add channel dimension (channel first)
+            observation = np.expand_dims(gray, axis=0).astype(np.uint8)
+
+            # Store frames for rendering/observation
+            self.last_raw_render_frame = resized.copy() # Store BGR for render
+            self.last_observation = observation.copy() # Store processed obs
+
+            return is_game_over, removed_lines, height, holes, observation
+
+        except (ConnectionAbortedError, ConnectionRefusedError, ValueError, socket.error) as e:
+             write_log(f"❌ Connection/Value error getting server response: {e}. Ending episode.")
+             self.client_sock = None # Mark socket as bad on known errors
+             # Return last known state and signal termination
+             return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
         except Exception as e:
-            write_log(f"{self._log_prefix} ❌ Unexpected error getting server response: {e}", True)
-            return True, self.current_cumulative_lines, self.current_height, self.current_holes, self.last_observation.copy()
+            write_log(f"❌ Unexpected error getting server response: {e}. Ending episode.", exc_info=True)
+            self.client_sock = None # Mark socket as bad on unexpected errors
+            # Return last known state and signal termination
+            return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+
 
     def step(self, action):
-        """ Executes action, gets state, calculates SHAPED reward. """
-        act_val = action.item() if isinstance(action, (np.ndarray, np.int_)) else int(action)
-        command = self.command_map.get(act_val)
+        # --- Send Action ---
+        command_map = {
+            0: b"move -1\n", # Left
+            1: b"move 1\n",  # Right
+            2: b"rotate 0\n", # Rotate Left
+            3: b"rotate 1\n", # Rotate Right
+            4: b"drop\n"     # Drop
+        }
+        command = command_map.get(action)
         if command is None:
-             write_log(f"⚠️ {self._log_prefix} Invalid action: {act_val}. Sending NOP.")
-             command = CMD_ROTATE_LEFT
+            write_log(f"⚠️ Invalid action received: {action}. Sending 'drop'.")
+            command = b"drop\n"
 
-        # Store state *before* taking the action to calculate changes
-        prev_height = self.current_height
-        prev_holes = self.current_holes
-        prev_lines = self.current_cumulative_lines
+        # write_log(f"Step {self.lifetime + 1}: Chosen Action={action}, Command={command.strip()}") # Too verbose usually
 
         try:
             self._send_command(command)
-            terminated, server_lines, server_height, server_holes, observation = self.get_tetris_server_response()
-        except (ConnectionAbortedError, ConnectionError, ValueError, socket.timeout) as e:
-            write_log(f"{self._log_prefix} ❌ Step comm/value error: {e}. Ending ep.")
-            reward = -self.current_go_penalty
-            info = {'lines': prev_lines, 'l': self.lifetime, 'status': 'error', 'final_status': 'comm_error'}
-            log_dict_fail = { "reward_step": reward, "lines_cleared_step": 0, "height": prev_height, "holes": prev_holes, "lifetime": self.lifetime, "reward_comp/line_clear": 0.0, "reward_comp/step": 0.0, "reward_comp/height_decrease": 0.0, "reward_comp/height_penalty": 0.0, "reward_comp/hole_penalty": 0.0, "reward_comp/game_over_penalty": -self.current_go_penalty, "penalty_coeffs/game_over": self.current_go_penalty }
-            self._safe_wandb_log(log_dict_fail)
-            return self.last_observation.copy(), reward, True, False, info
+        except (ConnectionAbortedError, ConnectionError) as e:
+            write_log(f"❌ Ending episode due to send failure in step: {e}", exc_info=True)
+            terminated = True
+            observation = self.last_observation.copy() # Return last valid observation
+            reward = self.penalty_game_over_coeff * -1 # Apply game over penalty directly
+            info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime, 'final_status': 'send_error'}
+            info['terminal_observation'] = observation.copy() # Add terminal observation
 
-        # --- Calculate Reward Components (SHAPED) ---
-        # Note: Height/Hole changes calculated based on state *before* this step vs state *after* this step.
-        lines_cleared_this_step = max(0, server_lines - prev_lines)
-        height_change = server_height - prev_height
-        hole_change = server_holes - prev_holes
+            # --- Log detailed rewards on send failure termination ---
+            if wandb_enabled and run:
+                try:
+                    # Log zero for reward components except the game over penalty
+                    log_data = {
+                        "reward/step_total": reward,
+                        "reward/step_line_clear": 0.0,
+                        "reward/step_height_penalty": 0.0,
+                        "reward/step_hole_penalty": 0.0,
+                        "reward/step_survival_penalty": 0.0,
+                        "reward/step_game_over_penalty": -self.penalty_game_over_coeff, # Log the penalty
+                        "env/lines_cleared_this_step": 0,
+                        "env/height_increase": 0, # We don't know the increase without response
+                        "env/hole_increase": 0,   # We don't know the increase without response
+                        "env/current_height": self.current_height, # Log last known state
+                        "env/current_holes": self.current_holes,   # Log last known state
+                        "env/current_lifetime": self.lifetime
+                    }
+                    wandb.log(log_data) # Log immediately
+                except Exception as log_e:
+                     if not self._wandb_log_error_reported:
+                         write_log(f"Wandb logging error in step (send fail): {log_e}")
+                         self._wandb_log_error_reported = True
+            # --- End logging ---
 
-        # 1. Line Clear Reward
+            return observation, reward, terminated, False, info # Return immediately
+
+        # --- Get State Update ---
+        # This call also handles communication errors and returns terminated=True in that case
+        terminated, new_lines_removed, new_height, new_holes, observation = self.get_tetris_server_response()
+
+        # If receive failed (returns terminated=True but might not be GO on server),
+        # it's treated as a terminal state due to communication error.
+        # Check if terminated is true AND stats didn't change AND observation is the same (implies communication failed)
+        if terminated and (new_lines_removed == self.lines_removed and new_height == self.current_height and new_holes == self.current_holes and np.array_equal(observation, self.last_observation)):
+             # The get_tetris_server_response already logged the error, just finalize step
+             reward = self.penalty_game_over_coeff * -1 # Ensure game over penalty
+             info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime, 'final_status': 'receive_error'}
+             info['terminal_observation'] = observation.copy()
+             # Log this specific termination case breakdown if receive error didn't already log it fully
+             # (get_tetris_server_response logs the error message but not the reward breakdown)
+             if wandb_enabled and run:
+                 try:
+                      log_data = {
+                          "reward/step_total": reward,
+                          "reward/step_line_clear": 0.0,
+                          "reward/step_height_penalty": 0.0,
+                          "reward/step_hole_penalty": 0.0,
+                          "reward/step_survival_penalty": 0.0,
+                          "reward/step_game_over_penalty": -self.penalty_game_over_coeff, # Log the penalty
+                          "env/lines_cleared_this_step": 0,
+                          "env/height_increase": 0,
+                          "env/hole_increase": 0,
+                          "env/current_height": self.current_height,
+                          "env/current_holes": self.current_holes,
+                          "env/current_lifetime": self.lifetime
+                      }
+                      wandb.log(log_data)
+                 except Exception as log_e:
+                      if not self._wandb_log_error_reported:
+                           write_log(f"Wandb logging error in step (receive fail breakdown): {log_e}")
+                           self._wandb_log_error_reported = True
+             return observation, reward, terminated, False, info
+
+
+        # --- Calculate Reward (if receive was successful) ---
+        reward = 0.0
+        lines_cleared_this_step = new_lines_removed - self.lines_removed
+
+        # --- !!! MODIFIED: Multi-line clear reward logic (Quadratic Bonus) !!! ---
         line_clear_reward = 0.0
-        multiplier_used = 0.0
         if lines_cleared_this_step > 0:
-            multiplier_used = self.line_clear_multipliers.get(lines_cleared_this_step, self.line_clear_multipliers.get(4, 8.0))
-            line_clear_reward = multiplier_used * self.reward_line_clear_coeff
+            # Use the base coefficient and apply quadratic scaling
+            if lines_cleared_this_step == 1:
+                line_clear_reward = 1 * self.reward_line_clear_base_coeff
+            elif lines_cleared_this_step == 2:
+                line_clear_reward = 4 * self.reward_line_clear_base_coeff # Double line -> 4x base
+            elif lines_cleared_this_step == 3:
+                line_clear_reward = 9 * self.reward_line_clear_base_coeff # Triple line -> 9x base
+            elif lines_cleared_this_step >= 4: # Tetris or more (should only be Tetris)
+                line_clear_reward = 25 * self.reward_line_clear_base_coeff # Tetris -> 25x base (significant bonus)
+            # Add a small bonus for any line clear to differentiate from no clear
+            reward += line_clear_reward
+        # --- END MODIFIED ---
 
-        # 2. Height Decrease Reward (Dense Shaping) <<< NEW
-        # Reward if height decreased (negative height_change)
-        height_decrease = max(0, -height_change)
-        height_decrease_reward = height_decrease * self.reward_height_decrease_coeff
 
-        # 3. Height Increase Penalty
-        height_increase = max(0, height_change)
-        height_penalty = height_increase * self.penalty_height_increase_coeff
+        height_increase = new_height - self.current_height
+        height_penalty = 0.0
+        # Only penalize if height increased
+        if height_increase > 0:
+            height_penalty = height_increase * self.penalty_height_increase_coeff
+            reward -= height_penalty
+        # Optional: Reward height decrease slightly? (Not implemented here, keeping simple)
+        # elif height_increase < 0:
+        #     reward += abs(height_increase) * some_small_positive_coeff
 
-        # 4. Hole Increase Penalty
-        hole_increase = max(0, hole_change)
-        hole_penalty = hole_increase * self.penalty_hole_increase_coeff
+        hole_increase = new_holes - self.current_holes
+        hole_penalty = 0.0
+        # Only penalize if holes increased
+        if hole_increase > 0:
+            hole_penalty = hole_increase * self.penalty_hole_increase_coeff
+            reward -= hole_penalty
+        # Optional: Reward hole decrease slightly? (Not implemented here, keeping simple)
+        # elif hole_increase < 0:
+        #     reward += abs(hole_increase) * some_small_positive_coeff
 
-        # 5. Step Reward/Penalty
-        step_reward = self.penalty_step_coeff # Can be positive or negative
 
-        # 6. Game Over Penalty
+        step_penalty = self.penalty_step_coeff # This is 0.0 from config/default
+        reward -= step_penalty # Apply step penalty (will be 0)
+
         game_over_penalty = 0.0
-        if terminated:
-            game_over_penalty = self.current_go_penalty
-
-        # --- Total Reward ---
-        reward = (line_clear_reward + height_decrease_reward + step_reward) \
-                 - (height_penalty + hole_penalty + game_over_penalty)
+        # Only apply game over penalty if server explicitly reported game over (not a communication error)
+        if terminated and (new_lines_removed != self.lines_removed or new_height != self.current_height or new_holes != self.current_holes or not np.array_equal(observation, self.last_observation)):
+            game_over_penalty = self.penalty_game_over_coeff
+            reward -= game_over_penalty
+            # Log only once per game over for clarity, ADDED reward breakdown
+            write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}. Step Reward Breakdown: LC={line_clear_reward:.2f}, HP={-height_penalty:.2f}, OP={-hole_penalty:.2f}, SP={-step_penalty:.2f}, GO={-game_over_penalty:.2f} -> Total={reward:.2f}")
 
         # --- Update Internal State ---
-        self.current_cumulative_lines = server_lines
-        self.current_height = server_height
-        self.current_holes = server_holes
+        self.lines_removed = new_lines_removed
+        self.current_height = new_height
+        self.current_holes = new_holes
         self.lifetime += 1
 
-        # --- Logging ---
-        if terminated:
-             write_log(f"{self._log_prefix} 💔 GameOver L={server_lines} Steps={self.lifetime} | "
-                       f"RComp: LC(x{multiplier_used:.1f})={line_clear_reward:.1f} HDec={height_decrease_reward:.1f} Step={step_reward:.2f} HIncr={-height_penalty:.1f} OIncr={-hole_penalty:.1f} GO={-game_over_penalty:.1f} "
-                       f"--> StepRew={reward:.2f}")
-        elif lines_cleared_this_step > 0: # Log line clears
-             write_log(f"{self._log_prefix} Step {self.lifetime} Lines={lines_cleared_this_step} R={reward:.2f} (LC={line_clear_reward:.1f} HDec={height_decrease_reward:.1f} HP={-height_penalty:.1f} OP={-hole_penalty:.1f})")
-
-
-        # --- Wandb Logging ---
-        log_dict = {
-            "reward_step": reward, "lines_cleared_step": lines_cleared_this_step,
-            "height": server_height, "holes": server_holes, "lifetime": self.lifetime,
-            "reward_comp/line_clear": line_clear_reward,
-            "reward_comp/height_decrease": height_decrease_reward, # <<< Log new component
-            "reward_comp/step": step_reward,
-            "reward_comp/height_penalty": -height_penalty,
-            "reward_comp/hole_penalty": -hole_penalty,
-            "reward_comp/game_over_penalty": -game_over_penalty,
-            "penalty_coeffs/game_over": self.current_go_penalty
+        # --- Prepare Return Values ---
+        # Gym requires info to be a dict, even if empty
+        info = {
+            'removed_lines': self.lines_removed, # Total lines cleared in this episode
+            'lifetime': self.lifetime, # Total steps in this episode
+            'lines_cleared_this_step': lines_cleared_this_step, # Lines cleared by THIS action
+            'height_increase': height_increase, # Change in height this step
+            'hole_increase': hole_increase # Change in holes this step
         }
-        self._safe_wandb_log(log_dict)
 
-        # --- Prepare Return ---
-        info = { 'lines': self.current_cumulative_lines, 'l': self.lifetime, 'height': server_height, 'holes': server_holes }
+        # Ensure terminal_observation is added only if terminated
         if terminated:
-            info['terminal_observation'] = observation.copy()
-            info['final_status'] = 'game_over'
-        truncated = False
+             info['terminal_observation'] = observation.copy()
+             # Add a final status if it's a server-side game over
+             if game_over_penalty > 0:
+                 info['final_status'] = 'game_over'
 
-        if self.render_mode == "human": self.render()
+
+        truncated = False # DQN typically doesn't use truncation like PPO
+
+        # --- !!! NEW: Detailed Wandb Logging !!! ---
+        if wandb_enabled and run:
+             try:
+                 log_data = {
+                     "reward/step_total": reward,
+                     "reward/step_line_clear": line_clear_reward,
+                     "reward/step_height_penalty": -height_penalty, # Log penalties as negative values
+                     "reward/step_hole_penalty": -hole_penalty,
+                     "reward/step_survival_penalty": -step_penalty, # Will be 0
+                     "reward/step_game_over_penalty": -game_over_penalty, # Will be non-zero only on last step
+                     "env/lines_cleared_this_step": lines_cleared_this_step,
+                     "env/height_increase": height_increase,
+                     "env/hole_increase": hole_increase,
+                     "env/current_height": self.current_height,
+                     "env/current_holes": self.current_holes,
+                     "env/current_lifetime": self.lifetime # Log lifetime at each step
+                 }
+                 # Filter out zero reward components (except game over) for cleaner graphs in Wandb
+                 # Keep all env/ metrics
+                 # Only log non-zero rewards or all env metrics
+                 filtered_log_data = {k: v for k, v in log_data.items() if not (k.startswith("reward/") and not k.endswith("game_over_penalty") and v == 0) or k.startswith("env/")}
+                 # Use the global step provided by the SB3 callback implicitly
+                 wandb.log(filtered_log_data)
+             except Exception as log_e:
+                 # Prevent spamming logs if Wandb logging fails repeatedly
+                 if not self._wandb_log_error_reported:
+                     write_log(f"Wandb logging error in step: {log_e}")
+                     self._wandb_log_error_reported = True
+        # --- END NEW ---
+
+
+        # Optional: Render on step if requested
+        if self.render_mode == "human":
+             self.render()
+
         return observation, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None):
-        # [Unchanged from previous version]
+        # We need to call super().reset(seed=seed) first for Gym API compliance
+        # even if we don't strictly use the seed here in the server interaction.
         super().reset(seed=seed)
-        write_log(f"{self._log_prefix} Resetting environment...")
+        # Reset the Wandb error reported flags for the new episode
         self._wandb_log_error_reported = False
-        for attempt in range(3):
+        self._eval_render_mode_error_reported = False
+        self._eval_render_error_reported = False
+        self._eval_render_error_reported_access = False
+
+
+        # Ensure socket is connected before sending reset command
+        if not self.client_sock:
+            write_log("⚠️ Socket not connected on reset. Attempting to reconnect...")
             try:
-                self._connect_socket()
-                self._send_command(CMD_START)
-                terminated, start_lines, start_height, start_holes, initial_observation = self.get_tetris_server_response()
-                if terminated or start_lines != 0:
-                    write_log(f"{self._log_prefix} ⚠️ Invalid reset state (Term={terminated}, Lines={start_lines}) attempt {attempt + 1}. Retrying...")
-                    if self.client_sock: try: self.client_sock.close(); self.client_sock=None; except socket.error: pass
-                    time.sleep(0.5 + attempt * 0.5)
-                    continue
-                self.current_cumulative_lines = 0
-                self.current_height = start_height
-                self.current_holes = start_holes
+                self._connect_socket(retries=3, delay=0.5)
+                write_log("    Reconnect successful during reset.")
+            except ConnectionError as e:
+                write_log(f"❌ Fatal: Reconnect failed during reset: {e}. Cannot start new episode.")
+                # If wandb is enabled and running, finish it with an error code
+                if run and hasattr(run, 'is_running') and run.is_running:
+                    run.finish(exit_code=1, quiet=True)
+                raise RuntimeError(f"Failed to reconnect to Tetris server on reset: {e}") from e
+
+
+        for attempt in range(5): # Allow more attempts to reset/reconnect
+            try:
+                # Ensure the socket is still healthy before sending start
+                self.client_sock.settimeout(5.0) # Short timeout for sending start
+                self._send_command(b"start\n")
+                # Give server a moment to process start and generate initial state
+                time.sleep(0.2) # Increased delay slightly
+                terminated, lines, height, holes, observation = self.get_tetris_server_response()
+
+                # If get_tetris_server_response failed due to communication error,
+                # it would return terminated=True and last observation.
+                # We need to differentiate server-side game over from communication failure on reset.
+                # A server-side game over right after 'start' is unlikely unless the server is misconfigured
+                # or the previous game didn't truly end.
+                # Let's check if the observation looks like a valid starting state (not all black/same as last)
+                # This is a heuristic check. A better way depends on server specific state info.
+                is_likely_communication_error = terminated and np.array_equal(observation, self.last_observation)
+
+                if terminated and not is_likely_communication_error:
+                    write_log(f"⚠️ Server reported game over on reset attempt {attempt+1}. Retrying...")
+                    if attempt < 4: # Reconnect and retry if not last attempt
+                         self._connect_socket(retries=3, delay=0.5) # Reconnect ensures a fresh state if server closed connection
+                         time.sleep(1.0) # Small delay before retry
+                         continue # Retry the loop
+                    else:
+                        write_log("❌ Server still terminated after multiple reset attempts. Cannot proceed.")
+                        raise RuntimeError("Tetris server failed to reset properly.")
+                elif is_likely_communication_error:
+                     write_log(f"⚠️ Communication error getting initial state on reset attempt {attempt+1}. Retrying...")
+                     if attempt < 4:
+                          self._connect_socket(retries=3, delay=0.5)
+                          time.sleep(1.0)
+                          continue
+                     else:
+                          write_log("❌ Failed to get valid initial state after multiple communication error on reset attempts. Cannot proceed.")
+                          raise RuntimeError("Tetris server failed to return initial state properly.")
+
+                # Reset successful (terminated is False and no communication error detected)
+                self.lines_removed = 0 # Reset internal counters for the new episode
+                self.current_height = height
+                self.current_holes = holes
                 self.lifetime = 0
-                self.last_observation = initial_observation.copy()
-                self.last_raw_render_frame = None
-                info = {'start_height': start_height, 'start_holes': start_holes}
-                write_log(f"{self._log_prefix} Reset successful. Initial H={start_height}, O={start_holes}")
-                return initial_observation, info
-            except (ConnectionAbortedError, ConnectionError, ConnectionRefusedError, socket.error, TimeoutError, ValueError) as e:
-                write_log(f"{self._log_prefix} 🔌 Reset conn/value error attempt {attempt + 1}/{3}: {e}")
-                if self.client_sock: try: self.client_sock.close(); self.client_sock=None; except socket.error: pass
-                if attempt == 2: raise RuntimeError(f"Failed reset after multiple connection attempts: {e}") from e
-                time.sleep(1.0 + attempt * 0.5)
+                self.last_observation = observation.copy()
+                # write_log(f"🔄 Environment Reset. Initial state: H={height}, O={holes}") # Less verbose logging
+                info = {} # Info dict for reset is usually empty or contains initial state info
+                self.client_sock.settimeout(5.0) # Reset timeout for step operations
+                return observation, info
+
+            except (ConnectionAbortedError, ConnectionError, socket.error, TimeoutError) as e:
+                 write_log(f"🔌 Connection issue during reset attempt {attempt+1} ({e}). Retrying...", exc_info=True)
+                 if attempt < 4:
+                     try:
+                         self._connect_socket(retries=3, delay=0.5) # Attempt reconnect
+                         time.sleep(1.0)
+                     except ConnectionError:
+                         write_log("    Reconnect failed during retry.")
+                         if attempt == 3: # If second to last attempt also fails, raise
+                              raise RuntimeError(f"Failed to reconnect and reset Tetris server after multiple attempts: {e}") from e
+                 else: # Final attempt failed
+                     raise RuntimeError(f"Failed to reset Tetris server after multiple attempts: {e}") from e
             except Exception as e:
-                write_log(f"{self._log_prefix} ❌ Unexpected reset error attempt {attempt + 1}/{3}: {e}", True)
-                if attempt == 2: raise RuntimeError(f"Failed reset due to unexpected error: {e}") from e
-                time.sleep(1.0 + attempt * 0.5)
-        write_log("❌ CRITICAL: Failed to reset environment after retry loop.")
-        raise RuntimeError("Failed to reset environment after retry loop.")
+                 write_log(f"❌ Unexpected error during reset attempt {attempt+1}: {e}. Retrying...", exc_info=True)
+                 if attempt < 4:
+                     time.sleep(1.0)
+                     continue
+                 else:
+                     raise RuntimeError(f"Failed to reset Tetris server after multiple attempts due to unexpected error: {e}") from e
+
+
+        # Should not be reached if logic is correct, but as fallback:
+        # If loop finishes without returning, it means all attempts failed
+        raise RuntimeError("Failed to reset Tetris server after exhausting retry attempts.")
+
 
     def render(self):
-        # [Unchanged from previous version]
+        """Renders the environment."""
+        # Ensure pygame is ready if in human mode
         self._initialize_pygame()
+
         if self.render_mode == "human" and self.is_pygame_initialized:
-            if self.window_surface is None: return
-            frame = self.last_raw_render_frame
-            if frame is not None and frame.shape == (self.RESIZED_DIM, self.RESIZED_DIM, 3):
+            import pygame
+            if self.window_surface is None:
+                 write_log("⚠️ Render called but Pygame window is not initialized.")
+                 return
+
+            # Check if we have a frame to render
+            if hasattr(self, 'last_raw_render_frame') and self.last_raw_render_frame is not None and self.last_raw_render_frame.shape[2] == 3:
                 try:
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # last_raw_render_frame is (H, W, C) BGR from OpenCV
+                    render_frame_rgb = cv2.cvtColor(self.last_raw_render_frame, cv2.COLOR_BGR2RGB)
+                    # Pygame surface requires (width, height)
                     surf = pygame.Surface((self.RESIZED_DIM, self.RESIZED_DIM))
-                    pygame.surfarray.blit_array(surf, np.transpose(rgb_frame, (1, 0, 2)))
-                    scaled_surf = pygame.transform.scale(surf, self.window_surface.get_size())
-                    self.window_surface.blit(scaled_surf, (0, 0))
-                    for event in pygame.event.get():
-                        if event.type == pygame.QUIT:
-                            write_log("Pygame window closed by user."); self.close(); return
-                    pygame.display.flip()
-                    self.clock.tick(self.metadata["render_fps"])
-                except Exception as e: write_log(f"⚠️ Pygame rendering error: {e}")
+                    # Transpose needed: (H, W, C) -> (W, H, C) for Pygame surfarray
+                    # surfarray.blit_array expects shape (width, height, channels)
+                    pygame.surfarray.blit_array(surf, np.transpose(render_frame_rgb, (1, 0, 2)))
+                    # Scale up to window size
+                    surf = pygame.transform.scale(surf, self.window_surface.get_size())
+                    self.window_surface.blit(surf, (0, 0))
+                    pygame.event.pump() # Process internal Pygame events
+                    pygame.display.flip() # Update the full screen surface
+                    if self.clock: # Ensure clock exists before ticking
+                        self.clock.tick(self.metadata["render_fps"]) # Control frame rate
+                except Exception as e:
+                    write_log(f"⚠️ Error during Pygame rendering: {e}", exc_info=True)
+                    # Optionally disable rendering on error: self.render_mode = None
+
             else:
-                try: self.window_surface.fill((0, 0, 0)); pygame.display.flip()
-                except Exception as e: write_log(f"⚠️ Pygame fill error: {e}")
+                # Draw a black screen if no frame available yet or frame is invalid
+                 self.window_surface.fill((0, 0, 0))
+                 pygame.display.flip()
+
         elif self.render_mode == "rgb_array":
-            if self.last_raw_render_frame is not None and self.last_raw_render_frame.shape == (self.RESIZED_DIM, self.RESIZED_DIM, 3):
-                return cv2.cvtColor(self.last_raw_render_frame, cv2.COLOR_BGR2RGB)
-            else: return np.zeros((self.RESIZED_DIM, self.RESIZED_DIM, 3), dtype=np.uint8)
+             # Return RGB (H, W, C) array
+             if hasattr(self, 'last_raw_render_frame') and self.last_raw_render_frame is not None and self.last_raw_render_frame.shape[2] == 3:
+                 return cv2.cvtColor(self.last_raw_render_frame, cv2.COLOR_BGR2RGB)
+             else:
+                 # Return black frame if no observation yet or frame is invalid
+                 # Ensure the shape matches what is expected for rgb_array
+                 return np.zeros((self.RESIZED_DIM, self.RESIZED_DIM, 3), dtype=np.uint8)
+
+        else:
+            # Rendering is disabled or not supported for the given mode
+            pass
+
 
     def close(self):
-        # [Unchanged from previous version]
-        write_log(f"{self._log_prefix} Closing environment resources...")
+        """Closes the environment, including socket and pygame."""
+        # write_log("🔌 Closing environment connection.") # Less verbose
         if self.client_sock:
-            try: self.client_sock.shutdown(socket.SHUT_RDWR); self.client_sock.close()
-            except socket.error as e: write_log(f"  Socket close error: {e}")
-            finally: self.client_sock = None
+            try:
+                # Optionally send a quit command to the server
+                # Depends on server support for a 'quit' command
+                # self._send_command(b"quit\n")
+                self.client_sock.close()
+            except socket.error as e:
+                 write_log(f"    Error closing socket: {e}")
+            self.client_sock = None
+
         if self.is_pygame_initialized:
             try:
-                if pygame_available: pygame.display.quit(); pygame.quit()
-            except Exception as e: write_log(f"  Pygame close error: {e}")
-            finally: self.is_pygame_initialized = False
-
-    def _safe_wandb_log(self, data):
-        # [Unchanged from previous version]
-        if wandb_enabled and run:
-            try:
-                if wandb.run and wandb.run.id == run.id:
-                    prefixed_data = {f"{self.current_phase_name}/{k}": v for k, v in data.items()}
-                    wandb.log(prefixed_data, commit=False)
+                import pygame
+                pygame.display.quit()
+                pygame.quit()
+                self.is_pygame_initialized = False
+                # write_log("    Pygame window closed.") # Less verbose
             except Exception as e:
-                if not self._wandb_log_error_reported:
-                    write_log(f"⚠️ {self._log_prefix} Wandb logging error in phase '{self.current_phase_name}': {e}")
-                    self._wandb_log_error_reported = True
+                 write_log(f"    Error closing Pygame: {e}")
+
+# --- Environment Setup ---
+write_log("✅ 建立基礎環境函數 make_env...")
+def make_env():
+    """Helper function to create an instance of the Tetris environment."""
+    # Pass render_mode to the environment constructor if needed for evaluation later
+    # For the training env, render_mode is typically None or "rgb_array" if you log videos during training
+    # For eval env later, we'll explicitly set "rgb_array" for GIF
+    env = TetrisEnv()
+    return env
+
+write_log("✅ 建立向量化環境 (DummyVecEnv)...")
+# Use DummyVecEnv for single environment interaction
+train_env_base = DummyVecEnv([make_env])
+
+write_log("✅ 包裝環境 (VecFrameStack)...")
+# Wrap with VecFrameStack (channel-first is important for PyTorch CNNs)
+# Use wandb config if available, otherwise use default from global config
+n_stack = run.config.get("n_stack", config["n_stack"]) if run else config["n_stack"]
+train_env_stacked = VecFrameStack(train_env_base, n_stack=n_stack, channels_order="first")
+write_log(f"    已設定 FrameStack 數量: {n_stack}")
+
+write_log("✅ 包裝環境 (VecNormalize - Rewards Only)...")
+# Wrap with VecNormalize, NORMALIZING REWARDS ONLY.
+# This helps stabilize training with potentially large shaped rewards.
+# gamma should match the model's gamma for correct reward normalization
+gamma_param = run.config.get("gamma", config["gamma"]) if run else config["gamma"]
+train_env = VecNormalize(train_env_stacked, norm_obs=False, norm_reward=True, gamma=gamma_param)
+write_log(f"    VecNormalize 設定: norm_obs=False, norm_reward=True, gamma={gamma_param}")
 
 
-# ==============================================================================
-# === Curriculum Callback Definition ===
-# ==============================================================================
-class CurriculumCallback(BaseCallback):
-    """ Callback for annealing parameters like game over penalty. [Unchanged] """
-    def __init__(self, penalty_start: float, penalty_end: float, anneal_fraction: float, total_training_steps: int, verbose: int = 0):
-        super().__init__(verbose)
-        self.penalty_start = penalty_start
-        self.penalty_end = penalty_end
-        self.anneal_fraction = max(0.0, min(1.0, anneal_fraction))
-        self.total_training_steps = total_training_steps
-        self.anneal_timesteps = 0
-        if self.anneal_fraction > 0 and self.penalty_start != self.penalty_end:
-             self.anneal_timesteps = int(total_training_steps * self.anneal_fraction)
-        self._annealing_finished_logged = False
-        self._callback_error_logged = False
-        self._env_method_error_logged = False
-        if self.anneal_timesteps > 0: write_log(f"[CurricCallback] Initialized: GO Penalty anneal {penalty_start:.2f} -> {penalty_end:.2f} over {self.anneal_timesteps} steps.")
-        else: write_log(f"[CurricCallback] Initialized: GO Penalty fixed at {penalty_start:.2f}.")
-
-    def _on_step(self) -> bool:
-        current_penalty = self.penalty_start
-        is_annealing_active = (self.anneal_timesteps > 0)
-        if is_annealing_active:
-            if self.num_timesteps <= self.anneal_timesteps:
-                progress = max(0.0, min(1.0, self.num_timesteps / self.anneal_timesteps))
-                current_penalty = self.penalty_start + progress * (self.penalty_end - self.penalty_start)
-            else:
-                current_penalty = self.penalty_end
-                if not self._annealing_finished_logged:
-                    write_log(f"[CurricCallback] GO Penalty Annealing finished at step {self.num_timesteps}. Fixed at: {current_penalty:.2f}")
-                    self._annealing_finished_logged = True
-        try:
-            if hasattr(self.training_env, 'env_method'): self.training_env.env_method('set_game_over_penalty', current_penalty)
-            elif hasattr(self.training_env, 'set_game_over_penalty'): self.training_env.set_game_over_penalty(current_penalty)
-            else:
-                 if not self._env_method_error_logged:
-                     write_log("⚠️ [CurricCallback] Env lacks method to set GO penalty."); self._env_method_error_logged = True
-            log_trigger = (self.num_timesteps % 10000 == 0) or (self.num_timesteps == 1) or (is_annealing_active and self.num_timesteps == self.anneal_timesteps + 1 and not self._annealing_finished_logged)
-            if log_trigger:
-                if self.logger: self.logger.record('train/current_go_penalty_coeff', current_penalty)
-                elif not self._callback_error_logged: write_log("⚠️ [CurricCallback] Logger not found."); self._callback_error_logged = True
-        except Exception as e:
-            if not self._callback_error_logged: write_log(f"❌ [CurricCallback] Error: {e}", exc_info=True); self._callback_error_logged = True
-        return True
+write_log("    環境建立完成並已包裝 (DummyVecEnv -> VecFrameStack -> VecNormalize)")
 
 
-# ==============================================================================
-# === Environment Creation Helper ===
-# ==============================================================================
-def make_tetris_env(env_config, seed=0):
-    """ Utility function to create and wrap the Tetris environment. [Unchanged] """
-    def _init():
-        env = TetrisEnv(env_config=env_config, render_mode=None)
-        env = Monitor(env)
-        env.reset(seed=seed)
-        return env
-    return _init
+# ----------------------------
+# DQN Model Setup and Training
+# ----------------------------
+write_log("🧠 設定 DQN 模型...")
+# Use wandb config for hyperparameters if available, otherwise use defaults from global config dict
+current_config = run.config if run else config # Use global config if no run active
 
-# ==============================================================================
-# === Global Variables and Main Execution ===
-# ==============================================================================
-model_p1 = model_p2 = model_p3 = None
-train_env_p1 = train_env_p2 = train_env_p3 = None
-phase1_success = phase2_success = phase3_success = False
-autodrop_check_passed = False
-if torch.cuda.is_available():
-    write_log(f"✅ GPU Detected: {torch.cuda.get_device_name(0)}")
-    device = "cuda"
+policy_type = current_config.get("policy_type", "CnnPolicy")
+learning_rate = current_config.get("learning_rate", 1e-4)
+buffer_size = current_config.get("buffer_size", 100000)
+learning_starts = current_config.get("learning_starts", 10000)
+batch_size = current_config.get("batch_size", 32)
+tau = 1.0 # Default for DQN target network update rate (1.0 means hard update)
+target_update_interval = current_config.get("target_update_interval", 1000) # MODIFIED: Reduced target update interval
+train_freq = current_config.get("train_freq", (1, "step")) # Default (1, "step")
+gradient_steps = current_config.get("gradient_steps", 1) # Default 1
+# --- !!! UPDATED Exploration Fraction used here !!! ---
+exploration_fraction = current_config.get("exploration_fraction", 0.5) # INCREASED default if not in wandb
+exploration_final_eps = current_config.get("exploration_final_eps", 0.05)
+# Use the determined device (cuda or cpu)
+device = torch.device(device)
+
+
+# Define DQN model
+model = DQN(
+    policy=policy_type,
+    env=train_env,
+    verbose=1, # Set to 1 or 2 for training logs
+    gamma=gamma_param, # Use loaded gamma from config/wandb
+    learning_rate=learning_rate,
+    buffer_size=buffer_size,
+    learning_starts=learning_starts,
+    batch_size=batch_size,
+    tau=tau,
+    train_freq=train_freq, # Use from config
+    gradient_steps=gradient_steps, # Use from config
+    target_update_interval=target_update_interval, # Use from config
+    exploration_fraction=exploration_fraction, # Use the updated value from config/wandb
+    exploration_final_eps=exploration_final_eps, # Use the updated value from config/wandb
+    # policy_kwargs is where you'd configure custom networks or potentially NoisyNet if supported
+    # For standard CnnPolicy, normalize_images=False is common as VecFrameStack handles uint8 to float
+    policy_kwargs=dict(normalize_images=False), # As per original code, let VecNormalize handle normalization
+    seed=42, # Set seed for reproducibility
+    device=device, # Use the determined device
+    # Log TensorBoard data to a directory that Wandb can sync from
+    tensorboard_log=f"/kaggle/working/runs/{run_id}" if wandb_enabled else None
+)
+write_log(f"    模型建立完成. Device: {model.device}")
+# write_log(f"    使用的超參數: {model.get_parameters()['policy']}") # Optional: log policy network details
+
+
+# Setup Wandb callback if enabled
+if wandb_enabled:
+    # Ensure the model save path exists
+    model_save_dir = f"/kaggle/working/models/{run_id}"
+    os.makedirs(model_save_dir, exist_ok=True)
+    write_log(f"    模型將儲存至: {model_save_dir}")
+
+    wandb_callback = WandbCallback(
+        gradient_save_freq=10000, # Log grads every 10k steps
+        model_save_path=model_save_dir, # Save models periodically
+        model_save_freq=100000, # Save every 100k steps
+        log="all", # Log histograms, gradients, etc.
+        verbose=2,
+        # Optionally log VecNormalize stats periodically
+        # sync_vecnormalize=True # This is the default behavior if VecNormalize is detected
+    )
+    callback_list = [wandb_callback]
 else:
-    write_log("⚠️ GPU not detected. Using CPU.")
-    device = "cpu"
+    callback_list = None # No callback if wandb is disabled
 
-# --- Main Training Loop ---
+
+# --- Training ---
+write_log(f"🚀 開始訓練 {TOTAL_TIMESTEPS} 步...")
+training_successful = False
 try:
-    write_log(f"\n{'='*20} Starting Training Run: {TOTAL_RUNTIME_ID} {'='*20}")
-    if not start_java_server():
-        write_log("❌❌ CRITICAL: Java server failed to start. Aborting script. ❌❌")
-        sys.exit(1)
+    model.learn(
+        total_timesteps=TOTAL_TIMESTEPS,
+        callback=callback_list,
+        log_interval=100 # Log basic stats (like FPS, mean reward) more frequently
+    )
+    write_log("✅ 訓練完成!")
+    training_successful = True
+except Exception as e:
+    write_log(f"❌ 訓練過程中發生錯誤: {e}", exc_info=True) # Log exception info with traceback
+    # Save model before exiting if error occurs mid-training
+    error_save_path = f'/kaggle/working/{STUDENT_ID}_dqn_error_save_{run_id}.zip' # Include run_id
+    write_log(f"    訓練中斷, 嘗試儲存模型至 {error_save_path}")
+    try:
+        # Ensure the model actually exists and has learned something before saving
+        if hasattr(model, 'num_timesteps') and model.num_timesteps > 0:
+             model.save(error_save_path)
+             write_log(f"    模型已嘗試儲存至 {error_save_path}")
+             if wandb_enabled and run: wandb.save(error_save_path) # Upload error model to wandb
+        else:
+             write_log("    模型尚未開始訓練 (num_timesteps is 0), 無法儲存.")
+    except Exception as save_e:
+         write_log(f"    ❌ 儲存錯誤模型時也發生錯誤: {save_e}")
 
-    phase1_uses_4_actions = config_p1.get("remove_drop_action", False)
-    if phase1_uses_4_actions:
-        write_log("Phase 1 uses 4 actions. Performing auto-drop check...")
-        autodrop_check_passed = check_server_autodrop()
-        if not autodrop_check_passed: write_log("❌ Auto-drop check FAILED/Unverified. Skipping Phase 1.")
-        else: write_log("✅ Auto-drop check PASSED. Proceeding with Phase 1.")
-    else:
-        write_log("Phase 1 uses 5 actions. Skipping auto-drop check.")
-        autodrop_check_passed = True
 
-    # ================= PHASE 1 =================
-    if autodrop_check_passed:
+# --- Save Final Model (only if training completed successfully) ---
+if training_successful:
+    stats_path = f"/kaggle/working/vecnormalize_stats_{run_id}.pkl"
+    final_model_name = f'{STUDENT_ID}_dqn_final_{run_id}.zip'
+    final_model_path = os.path.join("/kaggle/working", final_model_name)
+
+    try:
+        # Save the VecNormalize statistics, which are crucial for loading the model later
+        # Ensure the train_env is not None and is indeed VecNormalize
+        if train_env and isinstance(train_env, VecNormalize):
+            train_env.save(stats_path)
+            write_log(f"    VecNormalize 統計數據已儲存至 {stats_path}")
+            if wandb_enabled and run: wandb.save(stats_path) # Upload stats to wandb
+        else:
+             write_log("⚠️ train_env 不是 VecNormalize 實例或為 None, 無法儲存統計數據.")
+
+
+        model.save(final_model_path)
+        write_log(f"✅ 最終模型已儲存: {final_model_path}")
+        if 'kaggle_env' in locals() and kaggle_env: # Only display FileLink in Kaggle
+             display(FileLink(final_model_path))
+        if wandb_enabled and run: wandb.save(final_model_path) # Upload final model to wandb
+
+    except Exception as e:
+        write_log(f"❌ 儲存最終模型或統計數據時出錯: {e}", exc_info=True)
+        training_successful = False # Mark as unsuccessful if saving fails
+
+
+# ----------------------------
+# Evaluation (only if training and saving were successful)
+# ----------------------------
+if training_successful:
+    write_log("\n🧪 開始評估訓練後的模型...")
+
+    # Create a separate evaluation environment
+    eval_env = None # Initialize eval_env to None
+    try:
+        # Ensure evaluation env is created with render_mode if needed for GIF
+        # Use lambda to ensure a new environment is created each time
+        eval_env_base = DummyVecEnv([lambda: TetrisEnv(render_mode="rgb_array" if wandb_enabled else None)]) # Set render_mode for base env
+
+        # Wrap with FrameStack FIRST, same as training
+        n_stack_eval = run.config.get("n_stack", config["n_stack"]) if run else config["n_stack"]
+        eval_env_stacked = VecFrameStack(eval_env_base, n_stack=n_stack_eval, channels_order="first")
+
+        # Load the SAME VecNormalize statistics used during training
+        if os.path.exists(stats_path):
+             write_log(f"    載入 VecNormalize 統計數據從 {stats_path}")
+             eval_env = VecNormalize.load(stats_path, eval_env_stacked)
+             eval_env.training = False # Set mode to evaluation
+             eval_env.norm_reward = False # IMPORTANT: View actual rewards, not normalized ones
+             write_log("    評估環境建立成功並載入 VecNormalize 統計數據.")
+        else:
+             write_log(f"❌ 錯誤: VecNormalize 統計文件未找到於 {stats_path}。無法載入統計數據進行評估。")
+             # If stats not found, evaluation might be skewed, or skip normalization entirely
+             # For robustness, let's proceed without normalization if file is missing, but log a warning
+             write_log("⚠️ 將嘗試在沒有載入 VecNormalize 統計數據的情況下進行評估 (請注意分數可能不同).")
+             eval_env = eval_env_stacked # Use the frame-stacked env directly
+             # Ensure attributes expected by the eval loop exist even if not VecNormalize
+             # This mock is needed because VecFrameStack's default get_attr might not expose
+             # the base environment list in the same way VecNormalize does, or we need
+             # specific access patterns.
+             # MODIFIED: Correct the lambda to capture eval_env_stacked and use correct path
+             # The path from VecFrameStack to TetrisEnv is eval_env_stacked.envs.envs[i]
+             write_log("    設置 mock get_attr 方法用於評估環境...")
+             # Corrected lambda: captures eval_env_stacked and navigates down wrappers
+             # VecFrameStack -> DummyVecEnv (.envs) -> [TetrisEnv] (.envs)
+             eval_env.get_attr = lambda attr_name, indices=None, _self_fs_env=eval_env_stacked: [
+                 getattr(_self_fs_env.envs.envs[i], attr_name) # Access attribute on the base TetrisEnv
+                 for i in (indices if indices is not None else range(len(_self_fs_env.envs.envs))) # Iterate through base envs
+             ]
+             write_log("    已為 eval_env (VecFrameStack) 設置 mock get_attr 方法.")
+
+
+    except Exception as e:
+        write_log(f"❌ 建立評估環境時出錯: {e}", exc_info=True)
+        eval_env = None
+
+    if eval_env is not None:
+        # --- Run Evaluation Episodes ---
+        num_eval_episodes = 10 # Evaluate for 10 episodes for better average
+        total_rewards = []
+        total_lines = []
+        total_lifetimes = []
+        all_frames = [] # For GIF of the first episode
+
+        write_log(f"    執行 {num_eval_episodes} 輪評估...")
         try:
-            write_log(f"\n{'='*30} STARTING {PHASE_1_NAME} {'='*30}")
-            # --- Env Setup ---
-            write_log(f"Creating Env for {PHASE_1_NAME}...")
-            train_env_p1_base = DummyVecEnv([make_tetris_env(env_config=config_p1, seed=0)])
-            train_env_p1_stacked = VecFrameStack(train_env_p1_base, n_stack=config_p1["n_stack"], channels_order="first")
-            train_env_p1 = VecNormalize(train_env_p1_stacked, norm_obs=False, norm_reward=True, gamma=config_p1["gamma"], clip_reward=10.0)
-            action_space_size_p1 = train_env_p1.action_space.n
-            write_log(f" Phase 1 Env Created. Action Space Size: {action_space_size_p1}")
-            expected_actions_p1 = 4 if config_p1["remove_drop_action"] else 5
-            if action_space_size_p1 != expected_actions_p1: write_log(f"⚠️ WARNING: Phase 1 Action Space Mismatch! Expected {expected_actions_p1}, Got {action_space_size_p1}")
+            for i in range(num_eval_episodes):
+                write_log(f"    > 開始評估 Episode {i+1}")
+                obs, _ = eval_env.reset() # SB3 reset returns (obs, info)
+                # Handle potential Tuple obs from reset if using non-normalized env fallback (though SB3 resets usually handle this)
+                # if isinstance(obs, tuple):
+                #     obs = obs[0] # Take the observation part
+                done = False
+                episode_reward = 0
+                episode_lines = 0
+                episode_lifetime = 0
+                frames = []
+                last_info = {}
+                step_count = 0 # Track steps manually for safety
 
-            # --- Callbacks ---
-            write_log("Setting up Callbacks for Phase 1...")
-            callback_list_p1 = [CurriculumCallback(config_p1["penalty_game_over_start_coeff"], config_p1["penalty_game_over_end_coeff"], config_p1["curriculum_anneal_fraction"], config_p1["total_timesteps"], verbose=1)]
-            if wandb_enabled and run:
-                callback_list_p1.append(WandbCallback(gradient_save_freq=20000, log="all", verbose=0))
-                write_log(" Phase 1 Callbacks: Curriculum, Wandb.")
-            else: write_log(" Phase 1 Callbacks: Curriculum.")
+                while not done:
+                    # Render base env for GIF (only for first episode if wandb enabled)
+                    # Use get_attr to access the base environment's render method
+                    if i == 0 and wandb_enabled: # Check if wandb is enabled for logging GIF
+                         try:
+                             # Access the underlying TetrisEnv instance via get_attr
+                             # eval_env (VecNormalize or VecFrameStack) -> .get_attr("envs") -> [VecFrameStack or DummyVecEnv] -> element[0] -> .envs -> [TetrisEnv] -> element[0]
+                             # Let's use get_attr to get the list of base envs directly if possible, or navigate.
+                             # The mock get_attr returns a list where each element is a base env attribute.
+                             # If we call get_attr("."), it might return the base env itself? Let's try getting the 'env' attribute from the level above the base env.
+                             # Access the first element from the underlying DummyVecEnv's envs list
+                             # eval_env -> (VecNormalize/VecFrameStack) -> .envs[0] -> (DummyVecEnv) -> .envs[0] -> TetrisEnv
+                             # Use eval_env.get_attr('envs') to get list of wrapped envs (DummyVecEnv in this case)
+                             # Then access the first DummyVecEnv and its list of unwrapped envs
+                             wrapped_env_list = eval_env.get_attr('envs')
+                             if wrapped_env_list and hasattr(wrapped_env_list[0], 'envs') and wrapped_env_list[0].envs:
+                                  base_env_instance = wrapped_env_list[0].envs[0] # Get the actual TetrisEnv instance
+                                  if hasattr(base_env_instance, 'render') and base_env_instance.render_mode == "rgb_array": # Ensure base env has render method and mode
+                                       raw_frame = base_env_instance.render(mode="rgb_array")
+                                  else:
+                                      raw_frame = None # Cannot render if mode is not set or no render method
+                                      if i == 0 and not hasattr(self, '_eval_render_mode_error_reported'):
+                                          write_log("⚠️ 評估時基礎環境的 render_mode 未設置為 'rgb_array'，或無 render 方法，無法收集 GIF 幀.")
+                                          self._eval_render_mode_error_reported = True
 
-            # --- Model Creation ---
-            write_log(f"Setting up NEW DQN Model for {PHASE_1_NAME}...")
-            tb_log_path_p1 = os.path.join(output_dir, "runs", TOTAL_RUNTIME_ID, PHASE_1_NAME) if wandb_enabled else None
-            model_p1 = DQN(config_p1["policy_type"], train_env_p1, verbose=1, gamma=config_p1["gamma"], learning_rate=float(config_p1["learning_rate"]), buffer_size=config_p1["buffer_size"], learning_starts=config_p1["learning_starts"], batch_size=config_p1["batch_size"], tau=config_p1["tau"], train_freq=config_p1["train_freq"], gradient_steps=config_p1["gradient_steps"], target_update_interval=config_p1["target_update_interval"], exploration_fraction=config_p1["exploration_fraction"], exploration_initial_eps=1.0, exploration_final_eps=config_p1["exploration_final_eps"], seed=42, device=device, tensorboard_log=tb_log_path_p1, policy_kwargs=dict(normalize_images=True) )
-            write_log(f" DQN Model created. Device: {model_p1.device}")
-            write_log(f" TB Log Path (P1): {tb_log_path_p1}")
+                             else:
+                                raw_frame = None
+                                if i == 0 and not hasattr(self, '_eval_render_error_reported_access'):
+                                     write_log("⚠️ 評估時無法通過 get_attr 或直接屬性訪問到底層 TetrisEnv 實例來獲取渲染幀.")
+                                     self._eval_render_error_reported_access = True
 
-            # --- Training ---
-            write_log(f"🚀 Starting Phase 1 Training ({config_p1['total_timesteps']:,} steps)...")
-            t_start_p1 = time.time()
-            model_p1.learn(config_p1["total_timesteps"], callback=callback_list_p1, log_interval=10, tb_log_name=PHASE_1_NAME, reset_num_timesteps=True)
-            t_end_p1 = time.time()
-            write_log(f"✅ Phase 1 Training Complete! Time: {(t_end_p1 - t_start_p1) / 3600:.2f} hours")
 
-            # --- Saving ---
-            write_log(f"💾 Saving Phase 1 model: {phase1_model_save_path}")
-            model_p1.save(phase1_model_save_path)
-            write_log(f"💾 Saving Phase 1 VecNormalize stats: {phase1_stats_save_path}")
-            train_env_p1.save(phase1_stats_save_path)
-            phase1_success = True
+                             if raw_frame is not None:
+                                 # Resize the 84x84 RGB array to a larger size for the GIF
+                                 gif_frame = cv2.resize(raw_frame, (256, 256), interpolation=cv2.INTER_NEAREST) # Scale resized frame
+                                 frames.append(gif_frame)
+                         except Exception as render_err:
+                             # Log render error once per evaluation run
+                             if not hasattr(self, '_eval_render_error_reported') or not self._eval_render_error_reported:
+                                 write_log(f"⚠️ 評估時獲取渲染幀出錯: {render_err}", exc_info=True)
+                                 self._eval_render_error_reported = True # Prevent spam
 
-        except Exception as e: write_log(f"❌❌❌ PHASE 1 ERROR: {e}", True); phase1_success = False
-        except KeyboardInterrupt: write_log(f"🛑 Phase 1 Interrupted."); phase1_success = False
+
+                    # Predict and step using the trained model
+                    action, _ = model.predict(obs, deterministic=True) # Use deterministic actions for evaluation
+
+                    # Step the evaluation environment
+                    # SB3 step returns (obs, reward, terminated, truncated, info)
+                    obs, reward, terminated, truncated, infos = eval_env.step(action)
+
+                    # ensure infos is a list of dicts (VecEnv standard)
+                    if not isinstance(infos, list):
+                         # Handle unexpected info format, try to use it directly if possible
+                         last_info = infos
+                         # write_log("⚠️ eval_env.step returned infos not as a list. Check environment wrapper.") # Too noisy
+                    elif infos: # List is not empty
+                         last_info = infos[0] # Get info from the first (and only) environment
+                    else: # infos is an empty list
+                         last_info = {} # Default to empty dict
+
+                    # Accumulate rewards and stats (remember reward is NOT normalized here if norm_reward=False)
+                    # SB3 VecEnv step returns rewards as a numpy array
+                    if isinstance(reward, np.ndarray):
+                         episode_reward += reward[0]
+                    else:
+                         episode_reward += reward # Handle scalar reward (shouldn't happen with VecEnv)
+                         # write_log("⚠️ eval_env.step returned scalar reward. Check environment wrapper.") # Too noisy
+
+                    # Use .get() for safety, default to previous value if key missing
+                    # Ensure correct keys from TetrisEnv's info dict
+                    # These keys are set in TetrisEnv.step -> info dict
+                    episode_lines = last_info.get('removed_lines', episode_lines)
+                    episode_lifetime = last_info.get('lifetime', episode_lifetime) # Use lifetime from info if available
+                    step_count += 1 # Fallback step counter
+
+                    # Check for termination from either 'terminated' or 'truncated' flags
+                    done = terminated or truncated
+
+                    # Add a safety break for evaluation episodes to prevent infinite loops
+                    if step_count > 3000: # Increased limit again for potentially longer games
+                        write_log(f"⚠️ 評估 Episode {i+1} 超過 {step_count} 步, 強制終止.")
+                        done = True # Force end the episode
+                        # Add truncated flag if ended by step limit
+                        if not terminated: truncated = True
+
+
+                # Episode finished
+                # Use the lifetime from the last info received if available, otherwise the step count
+                final_episode_lifetime = last_info.get('lifetime', step_count)
+
+                write_log(f"    < 完成評估 Episode {i+1}: Reward={episode_reward:.2f}, Lines={episode_lines}, Steps={final_episode_lifetime}")
+                total_rewards.append(episode_reward)
+                total_lines.append(episode_lines)
+                total_lifetimes.append(final_episode_lifetime) # Use the final lifetime
+
+                if i == 0: all_frames = frames # Store frames from the first episode
+
+            write_log(f"--- 評估結果 ({num_eval_episodes} episodes) ---")
+            # Calculate and print aggregate statistics
+            if total_rewards: # Ensure lists are not empty
+                 mean_reward = np.mean(total_rewards)
+                 std_reward = np.std(total_rewards)
+                 mean_lines = np.mean(total_lines)
+                 std_lines = np.std(total_lines)
+                 mean_lifetime = np.mean(total_lifetimes)
+                 std_lifetime = np.std(total_lifetimes)
+
+                 write_log(f"    平均 Reward: {mean_reward:.2f} +/- {std_reward:.2f}")
+                 write_log(f"    平均 Lines: {mean_lines:.2f} +/- {std_lines:.2f}")
+                 write_log(f"    平均 Steps: {mean_lifetime:.2f} +/- {std_lifetime:.2f}")
+
+                 # Log evaluation metrics to Wandb
+                 if wandb_enabled and run:
+                     wandb.log({
+                         "eval/mean_reward": mean_reward, "eval/std_reward": std_reward,
+                         "eval/mean_lines": mean_lines, "eval/std_lines": std_lines,
+                         "eval/mean_lifetime": mean_lifetime, "eval/std_lifetime": std_lifetime,
+                         "global_step": model.num_timesteps # Log eval results at the final training step
+                     })
+            else:
+                 write_log("    沒有完成任何評估回合.")
+
+
+            # --- Generate Replay GIF ---
+            if all_frames and wandb_enabled: # Only generate GIF if frames were collected and wandb is enabled
+                 gif_path = f'/kaggle/working/replay_eval_{run_id}.gif'
+                 write_log(f"💾 正在儲存評估回放 GIF 至 {gif_path}...")
+                 try:
+                     # Ensure frames are uint8 and not None
+                     imageio.mimsave(gif_path, [np.array(frame).astype(np.uint8) for frame in all_frames if frame is not None], fps=15, loop=0)
+                     write_log("    GIF 儲存成功.")
+                     if 'kaggle_env' in locals() and kaggle_env: # Only display FileLink in Kaggle
+                          display(FileLink(gif_path))
+                     if wandb_enabled and run:
+                         wandb.log({"eval/replay": wandb.Video(gif_path, fps=15, format="gif"), "global_step": model.num_timesteps}) # Log GIF to Wandb
+                 except Exception as e: write_log(f"    ❌ 儲存 GIF 時發生錯誤: {e}", exc_info=True)
+            elif wandb_enabled: # Log why GIF wasn't saved if wandb is enabled
+                 write_log("    ⚠️ 未能儲存 GIF (沒有收集到幀, 第一輪評估出錯, 或 Wandb 未啟用).")
+
+
+            # --- Save Evaluation Results CSV ---
+            if total_lines: # Only save CSV if there's data
+                 csv_filename = f'tetris_evaluation_scores_{run_id}.csv'
+                 csv_path = os.path.join("/kaggle/working", csv_filename)
+                 write_log(f"💾 正在儲存評估分數 CSV 至 {csv_path}...")
+                 try:
+                     with open(csv_path, 'w') as fs:
+                         fs.write('episode_id,removed_lines,played_steps,reward\n')
+                         # Ensure lists are not empty before accessing index
+                         for i in range(len(total_lines)):
+                              fs.write(f'eval_{i},{total_lines[i]},{total_lifetimes[i]},{total_rewards[i]:.2f}\n')
+                         # Write average row if data exists
+                         if total_rewards: # Use total_rewards to check if any episode finished
+                             fs.write(f'eval_avg,{mean_lines:.2f},{mean_lifetime:.2f},{mean_reward:.2f}\n')
+                     write_log(f"✅ 評估分數 CSV 已儲存: {csv_path}")
+                     if 'kaggle_env' in locals() and kaggle_env: # Only display FileLink in Kaggle
+                         display(FileLink(csv_path))
+                     if wandb_enabled and run: wandb.save(csv_path) # Upload CSV to wandb
+                 except Exception as e: write_log(f"    ❌ 儲存 CSV 時發生錯誤: {e}", exc_info=True)
+            else:
+                 write_log("    ⚠️ 沒有評估數據可以儲存為 CSV.")
+
+        except Exception as eval_e:
+            write_log(f"❌ 評估迴圈中發生錯誤: {eval_e}", exc_info=True)
+
         finally:
-            if train_env_p1 is not None:
-                try: train_env_p1.close(); write_log(" Phase 1 Env closed.")
-                except Exception as e: write_log(f" Error closing P1 Env: {e}")
-    else: write_log(f"⏩ Phase 1 ({PHASE_1_NAME}) was skipped.")
+            # Ensure evaluation env is closed even if errors occur
+            if eval_env:
+                 # Check if eval_env has a close method (VecEnvs do)
+                 if hasattr(eval_env, 'close'):
+                    eval_env.close()
+                    write_log("    評估環境已關閉.")
+                 # Also explicitly close the base env if it's different and has a close method
+                 # This part might be overly cautious depending on VecEnv implementations,
+                 # but safer for custom setups.
+                 if 'eval_env_stacked' in locals() and eval_env is not eval_env_stacked and hasattr(eval_env_stacked, 'close'):
+                      # Check if eval_env_stacked is not None before closing
+                      if eval_env_stacked:
+                           eval_env_stacked.close()
+                           write_log("    評估堆疊環境已關閉.")
+                 if 'eval_env_base' in locals() and eval_env_stacked is not eval_env_base and hasattr(eval_env_base, 'close'):
+                      # Check if eval_env_base is not None before closing
+                      if eval_env_base:
+                           eval_env_base.close()
+                           write_log("    評估基礎向量環境已關閉.")
 
-    # ================= PHASE 2 =================
-    if phase1_success and os.path.exists(phase1_model_save_path) and os.path.exists(phase1_stats_save_path):
-        try:
-            write_log(f"\n{'='*30} STARTING {PHASE_2_NAME} {'='*30}")
-            # --- Env Setup ---
-            write_log(f"Creating Env for {PHASE_2_NAME}...")
-            train_env_p2_base = DummyVecEnv([make_tetris_env(env_config=config_p2, seed=1)])
-            train_env_p2_stacked = VecFrameStack(train_env_p2_base, n_stack=config_p2["n_stack"], channels_order="first")
-            write_log(f"🔄 Loading P1 VecNormalize stats: {phase1_stats_save_path}")
-            train_env_p2 = VecNormalize.load(phase1_stats_save_path, train_env_p2_stacked)
-            train_env_p2.training = True
-            train_env_p2.gamma = config_p2["gamma"]
-            action_space_size_p2 = train_env_p2.action_space.n
-            write_log(f" Phase 2 Env Created/Stats Loaded. Action Space Size: {action_space_size_p2}")
-            expected_actions_p2 = 4 if config_p2["remove_drop_action"] else 5
-            if action_space_size_p2 != expected_actions_p2: write_log(f"⚠️ WARNING: Phase 2 Action Space Mismatch! Expected {expected_actions_p2}, Got {action_space_size_p2}")
 
-            # --- Callbacks ---
-            write_log("Setting up Callbacks for Phase 2...")
-            callback_list_p2 = [CurriculumCallback(config_p2["penalty_game_over_start_coeff"], config_p2["penalty_game_over_end_coeff"], config_p2["curriculum_anneal_fraction"], config_p2["total_timesteps"], verbose=1)]
-            if wandb_enabled and run:
-                callback_list_p2.append(WandbCallback(gradient_save_freq=50000, log="all", verbose=0))
-                write_log(" Phase 2 Callbacks: Curriculum(Active GO), Wandb.")
-            else: write_log(" Phase 2 Callbacks: Curriculum(Active GO).")
+# --- Cleanup ---
+write_log("🧹 清理環境...")
+# Ensure training env is closed
+if 'train_env' in locals() and train_env: # Check if train_env exists and is not None
+    try:
+        train_env.close()
+        write_log("    訓練環境已關閉.")
+    except Exception as e:
+        write_log(f"    關閉訓練環境時出錯: {e}")
 
-            # --- Model Loading & Adaptation ---
-            write_log(f"🔄 Loading Phase 1 DQN model: {phase1_model_save_path}")
-            tb_log_path_p2 = os.path.join(output_dir, "runs", TOTAL_RUNTIME_ID, PHASE_2_NAME) if wandb_enabled else None
-            model_p2 = DQN.load(phase1_model_save_path, env=train_env_p2, device=device, tensorboard_log=tb_log_path_p2)
-            write_log(" Phase 1 Model loaded. Policy action space potentially adapted.")
-            write_log(f" TB Log Path (P2): {tb_log_path_p2}")
-            write_log(f" Updating model hyperparameters for Phase 2...")
-            model_p2.learning_rate = float(config_p2["learning_rate"])
-            model_p2.exploration_fraction = config_p2["exploration_fraction"]
-            model_p2.exploration_final_eps = config_p2["exploration_final_eps"]
-            model_p2.learning_starts = config_p2["learning_starts"]
-            model_p2.target_update_interval = config_p2["target_update_interval"]
-            model_p2.train_freq = config_p2["train_freq"]
-            if model_p2.buffer_size != config_p2["buffer_size"]: write_log(f"⚠️ WARNING: P2 buffer_size config ({config_p2['buffer_size']}) differs from loaded ({model_p2.buffer_size}). Keeping loaded size.")
-            write_log(" Model hyperparameters updated.")
+# Close the Java server process
+if java_process and java_process.poll() is None: # Check if process exists and is running (poll() is None means running)
+      write_log("    正在終止 Java server process...")
+      try:
+          java_process.terminate() # Send SIGTERM
+          # Add a timeout for graceful termination
+          java_process.wait(timeout=10) # Wait up to 10 seconds
+          write_log("    Java server process 已終止.")
+      except subprocess.TimeoutExpired:
+          write_log("    Java server 未能在 10 秒內終止, 強制結束...")
+          java_process.kill() # Send SIGKILL
+          write_log("    Java server process 已強制結束.")
+      except Exception as e:
+          write_log(f"    終止 Java server process 時發生錯誤: {e}")
 
-            # --- Training ---
-            write_log(f"🚀 Starting Phase 2 Training ({config_p2['total_timesteps']:,} steps)...")
-            t_start_p2 = time.time()
-            model_p2.learn(config_p2["total_timesteps"], callback=callback_list_p2, log_interval=10, tb_log_name=PHASE_2_NAME, reset_num_timesteps=False)
-            t_end_p2 = time.time()
-            write_log(f"✅ Phase 2 Training Complete! Time: {(t_end_p2 - t_start_p2) / 3600:.2f} hours")
+elif java_process and java_process.poll() is not None: # Process exists but is not running
+    write_log("    Java server process 已自行結束.")
+else: # Process object doesn't exist
+    write_log("    Java server process 未啟動.")
 
-            # --- Saving ---
-            write_log(f"💾 Saving Phase 2 model: {phase2_model_save_path}")
-            model_p2.save(phase2_model_save_path)
-            write_log(f"💾 Saving Phase 2 VecNormalize stats: {phase2_stats_save_path}")
-            train_env_p2.save(phase2_stats_save_path)
-            phase2_success = True
 
-        except Exception as e: write_log(f"❌❌❌ PHASE 2 ERROR: {e}", True); phase2_success = False
-        except KeyboardInterrupt: write_log(f"🛑 Phase 2 Interrupted."); phase2_success = False
-        finally:
-             if train_env_p2 is not None:
-                try: train_env_p2.close(); write_log(" Phase 2 Env closed.")
-                except Exception as e: write_log(f" Error closing P2 Env: {e}")
-    else:
-        if not phase1_success: write_log(f"\n⏩ Skipping Phase 2 ({PHASE_2_NAME}) as P1 was unsuccessful/skipped.")
+# Finish the Wandb run if it was initialized and training didn't crash early
+# Ensure run is finalized regardless of success, but mark failure if needed
+if run: # Check if run object exists
+    # Check if run is still running before trying to finish
+    # Use run.finish() directly; it handles the state internally
+    # Passing exit_code helps signal success (0) or failure (non-zero) in Wandb UI
+    exit_code = 0 if training_successful else 1
+    # Check if the run is already finished (e.g., by an earlier exception handler)
+    if hasattr(run, '_run_state') and run._run_state != 'finished':
+         try:
+              run.finish(exit_code=exit_code)
+              write_log(f"✨ Wandb run finished (exit code {exit_code}).")
+         except Exception as e:
+              write_log(f"❌ Error finishing Wandb run: {e}")
+    elif not hasattr(run, '_run_state'): # Fallback for older wandb versions
+         try:
+              run.finish(exit_code=exit_code)
+              write_log(f"✨ Wandb run finished (exit code {exit_code}, fallback).")
+         except Exception as e:
+              # print("Wandb run might have been finished already.")
+              pass # Assume it was already finished
 
-    # ================= PHASE 3 =================
-    if phase2_success and os.path.exists(phase2_model_save_path) and os.path.exists(phase2_stats_save_path):
-        try:
-            write_log(f"\n{'='*30} STARTING {PHASE_3_NAME} {'='*30}")
-            # --- Env Setup ---
-            write_log(f"Creating Env for {PHASE_3_NAME}...")
-            train_env_p3_base = DummyVecEnv([make_tetris_env(env_config=config_p3, seed=2)])
-            train_env_p3_stacked = VecFrameStack(train_env_p3_base, n_stack=config_p3["n_stack"], channels_order="first")
-            write_log(f"🔄 Loading P2 VecNormalize stats: {phase2_stats_save_path}")
-            train_env_p3 = VecNormalize.load(phase2_stats_save_path, train_env_p3_stacked)
-            train_env_p3.training = True
-            train_env_p3.gamma = config_p3["gamma"]
-            action_space_size_p3 = train_env_p3.action_space.n
-            write_log(f" Phase 3 Env Created/Stats Loaded. Action Space Size: {action_space_size_p3}")
-            expected_actions_p3 = 4 if config_p3["remove_drop_action"] else 5
-            if action_space_size_p3 != expected_actions_p3: write_log(f"⚠️ WARNING: Phase 3 Action Space Mismatch! Expected {expected_actions_p3}, Got {action_space_size_p3}")
 
-            # --- Callbacks ---
-            write_log("Setting up Callbacks for Phase 3...")
-            callback_list_p3 = [CurriculumCallback(config_p3["penalty_game_over_start_coeff"], config_p3["penalty_game_over_end_coeff"], config_p3["curriculum_anneal_fraction"], config_p3["total_timesteps"], verbose=1)]
-            if wandb_enabled and run:
-                callback_list_p3.append(WandbCallback(gradient_save_freq=100000, log="all", verbose=0))
-                write_log(" Phase 3 Callbacks: Curriculum(Inactive GO), Wandb.")
-            else: write_log(" Phase 3 Callbacks: Curriculum(Inactive GO).")
-
-            # --- Model Loading & Adaptation ---
-            write_log(f"🔄 Loading Phase 2 DQN model: {phase2_model_save_path}")
-            tb_log_path_p3 = os.path.join(output_dir, "runs", TOTAL_RUNTIME_ID, PHASE_3_NAME) if wandb_enabled else None
-            model_p3 = DQN.load(phase2_model_save_path, env=train_env_p3, device=device, tensorboard_log=tb_log_path_p3)
-            write_log(" Phase 2 Model loaded.")
-            write_log(f" TB Log Path (P3): {tb_log_path_p3}")
-            write_log(f" Updating model hyperparameters for Phase 3...")
-            model_p3.learning_rate = float(config_p3["learning_rate"])
-            model_p3.exploration_fraction = config_p3["exploration_fraction"]
-            model_p3.exploration_final_eps = config_p3["exploration_final_eps"]
-            model_p3.learning_starts = config_p3["learning_starts"]
-            model_p3.target_update_interval = config_p3["target_update_interval"]
-            model_p3.train_freq = config_p3["train_freq"]
-            if model_p3.buffer_size != config_p3["buffer_size"]: write_log(f"⚠️ WARNING: P3 buffer_size config ({config_p3['buffer_size']}) differs from loaded ({model_p3.buffer_size}). Keeping loaded size.")
-            write_log(" Model hyperparameters updated.")
-
-            # --- Training ---
-            write_log(f"🚀 Starting Phase 3 Training ({config_p3['total_timesteps']:,} steps)...")
-            t_start_p3 = time.time()
-            model_p3.learn(config_p3["total_timesteps"], callback=callback_list_p3, log_interval=10, tb_log_name=PHASE_3_NAME, reset_num_timesteps=False)
-            t_end_p3 = time.time()
-            write_log(f"✅ Phase 3 Training Complete! Time: {(t_end_p3 - t_start_p3) / 3600:.2f} hours")
-
-            # --- Saving FINAL ---
-            write_log(f"💾 Saving FINAL Phase 3 model: {phase3_final_model_save_path}")
-            model_p3.save(phase3_final_model_save_path)
-            write_log(f"💾 Saving FINAL Phase 3 VecNormalize stats: {phase3_final_stats_save_path}")
-            train_env_p3.save(phase3_final_stats_save_path)
-            if ipython_available:
-                write_log("Displaying final model/stats file links:")
-                display(FileLink(phase3_final_model_save_path))
-                display(FileLink(phase3_final_stats_save_path))
-            phase3_success = True
-
-        except Exception as e: write_log(f"❌❌❌ PHASE 3 ERROR: {e}", True); phase3_success = False
-        except KeyboardInterrupt: write_log(f"🛑 Phase 3 Interrupted."); phase3_success = False
-        finally:
-             if train_env_p3 is not None:
-                try: train_env_p3.close(); write_log(" Phase 3 Env closed.")
-                except Exception as e: write_log(f" Error closing P3 Env: {e}")
-    else:
-        if not phase2_success and phase1_success: write_log(f"\n⏩ Skipping Phase 3 ({PHASE_3_NAME}) as P2 was unsuccessful.")
-
-except Exception as main_e: write_log(f"💥💥💥 UNHANDLED EXCEPTION in main script: {main_e}", True)
-except KeyboardInterrupt: write_log("\n🛑🛑🛑 Main script interrupted by user (Ctrl+C). 🛑🛑🛑")
-finally:
-    # ================= FINAL CLEANUP =================
-    write_log(f"\n{'='*20} Final Cleanup & Reporting {'='*20}")
-    # --- Terminate Java Server ---
-    if java_process and java_process.poll() is None:
-        write_log("🧹 Terminating Java server process...")
-        java_process.terminate()
-        try: java_process.wait(timeout=5); write_log("✅ Java server terminated gracefully.")
-        except subprocess.TimeoutExpired:
-            write_log("⚠️ Java server did not terminate gracefully, killing..."); java_process.kill()
-            try: java_process.wait(timeout=2); write_log("✅ Java server killed.")
-            except Exception as kill_e: write_log(f"⚠️ Error waiting for killed Java process: {kill_e}")
-        except Exception as e: write_log(f"⚠️ Error during Java server termination: {e}")
-    elif java_process: write_log("🧹 Java server process already terminated.")
-    else: write_log("🧹 Java server process not started/failed early.")
-
-    # --- Upload Final Artifacts ---
-    final_model_to_upload = None
-    final_stats_to_upload = None
-    final_phase_name = "None"
-    if phase3_success and os.path.exists(phase3_final_model_save_path) and os.path.exists(phase3_final_stats_save_path):
-        final_model_to_upload, final_stats_to_upload, final_phase_name = phase3_final_model_save_path, phase3_final_stats_save_path, PHASE_3_NAME
-    elif phase2_success and os.path.exists(phase2_model_save_path) and os.path.exists(phase2_stats_save_path):
-        final_model_to_upload, final_stats_to_upload, final_phase_name = phase2_model_save_path, phase2_stats_save_path, PHASE_2_NAME
-    elif phase1_success and os.path.exists(phase1_model_save_path) and os.path.exists(phase1_stats_save_path):
-        final_model_to_upload, final_stats_to_upload, final_phase_name = phase1_model_save_path, phase1_stats_save_path, PHASE_1_NAME
-
-    if wandb_enabled and run and final_model_to_upload:
-        write_log(f"☁️ Uploading final artifacts (from {final_phase_name}) to Wandb...")
-        try:
-            if wandb.run and wandb.run.id == run.id:
-                model_artifact = wandb.Artifact(f"{STUDENT_ID}-dqn-model-{TOTAL_RUNTIME_ID}", type="model"); model_artifact.add_file(final_model_to_upload); run.log_artifact(model_artifact)
-                write_log(f"  Model artifact logged: {os.path.basename(final_model_to_upload)}")
-                stats_artifact = wandb.Artifact(f"{STUDENT_ID}-dqn-vecnorm-stats-{TOTAL_RUNTIME_ID}", type="normalization_stats"); stats_artifact.add_file(final_stats_to_upload); run.log_artifact(stats_artifact)
-                write_log(f"  Stats artifact logged: {os.path.basename(final_stats_to_upload)}")
-                write_log("✅ Wandb artifact upload successful.")
-            else: write_log("⚠️ Wandb run inactive, cannot upload final artifacts.")
-        except Exception as e: write_log(f"⚠️ Wandb artifact upload error: {e}", True)
-    elif wandb_enabled and run: write_log("☁️ Skipping final artifact upload (no successful phase/files missing).")
-
-    # --- Finish Wandb Run ---
-    if wandb_enabled and run:
-        write_log("Finishing Wandb run...")
-        overall_success = phase3_success
-        exit_code = 0 if overall_success else 1
-        try:
-            if wandb.run and wandb.run.id == run.id:
-                run.summary["Phase1_Success"] = phase1_success
-                run.summary["Phase2_Success"] = phase2_success
-                run.summary["Phase3_Success"] = phase3_success
-                run.summary["Overall_Success"] = overall_success
-                run.finish(exit_code=exit_code)
-                write_log(f"✅ Wandb run '{TOTAL_RUNTIME_ID}' finished (exit code {exit_code}).")
-            else: write_log("⚠️ Wandb run already finished/inactive.")
-        except Exception as finish_e: write_log(f"⚠️ Error finishing Wandb run: {finish_e}")
-
-    # --- Final Status Report ---
-    write_log(f"\n🏁🏁🏁 TRAINING RUN SUMMARY ({TOTAL_RUNTIME_ID}) 🏁🏁🏁")
-    write_log(f"  Algorithm: DQN (Shaped Rewards)")
-    write_log(f"  Phase 1 ({PHASE_1_NAME}) Success: {phase1_success}")
-    write_log(f"  Phase 2 ({PHASE_2_NAME}) Success: {phase2_success}")
-    write_log(f"  Phase 3 ({PHASE_3_NAME}) Success: {phase3_success}")
-    final_result_path = "N/A"
-    if final_model_to_upload: final_result_path = final_model_to_upload
-    write_log(f"  Final Model Available: {final_result_path}")
-
-    # --- Display Log File Link ---
-    write_log("-" * 50)
-    if os.path.exists(log_path):
-        write_log(f"📜 Training log saved to: {log_path}")
-        if ipython_available:
-            try: display(FileLink(log_path))
-            except Exception as display_e: write_log(f"(Could not display log file link: {display_e})")
-    else: write_log("📜 Log file not found.")
-
-    write_log("🏁 Script execution finished. 🏁")
+write_log("🏁 腳本執行完畢.")
