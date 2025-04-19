@@ -35,7 +35,23 @@ else:
 
 # Import WandbCallback for SB3 integration
 from wandb.integration.sb3 import WandbCallback
+def write_log(message, exc_info=False):
+    """Appends a message to the log file and prints it."""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    log_message = f"{timestamp} - {message}"
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(log_message + "\n")
+            if exc_info:
+                 import traceback
+                 traceback.print_exc(file=f)
 
+    except Exception as e:
+        print(f"Error writing to log file {log_path}: {e}")
+    print(log_message)
+    if exc_info:
+        import traceback
+        traceback.print_exc()
 # --- Configuration ---
 # Set your student ID here for filenames
 STUDENT_ID = "YOUR_STUDENT_ID" # <<<<<<<<<<< 請修改為你的學號
@@ -117,25 +133,6 @@ if wandb_enabled:
 
 
 log_path = f"/kaggle/working/tetris_train_log_{run_id}.txt"
-
-def write_log(message, exc_info=False):
-    """Appends a message to the log file and prints it."""
-    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-    log_message = f"{timestamp} - {message}"
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(log_message + "\n")
-            if exc_info:
-                 import traceback
-                 traceback.print_exc(file=f)
-
-    except Exception as e:
-        print(f"Error writing to log file {log_path}: {e}")
-    print(log_message)
-    if exc_info:
-        import traceback
-        traceback.print_exc()
-
 
 def wait_for_tetris_server(ip="127.0.0.1", port=10612, timeout=60):
     """Waits for the Tetris TCP server to become available."""
