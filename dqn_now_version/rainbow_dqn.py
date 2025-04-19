@@ -2,45 +2,26 @@
 import numpy as np
 import socket
 import cv2
+# import matplotlib.pyplot as plt # Matplotlib not strictly needed for core logic
 import subprocess
 import os
-import time
-
-from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack, DummyVecEnv
-# Removed unused imports: shutil, glob, matplotlib.pyplot, IPython.display.FileLink, IPython.display.display
-# Removed unused imports: stable_baselines3.common.env_checker, stable_baselines3.common.env_util, stable_baselines3.common.callbacks
+import shutil
+import glob
 import imageio
 import gymnasium as gym
 from gymnasium import spaces
-# Import RainbowDQN from sb3_contrib
-# YOU NEED TO INSTALL sb3-contrib: pip install sb3-contrib
-try:
-    from sb3_contrib import RainbowDQN
-    write_log("✅ 成功導入 sb3_contrib.RainbowDQN")
-except ImportError:
-    write_log("❌ 錯誤: 未找到 sb3_contrib 套件。請使用 'pip install sb3-contrib' 安裝。")
-    # Define a dummy class or exit gracefully if import fails
-    class RainbowDQN:
-        def __init__(self, *args, **kwargs):
-            raise ImportError("sb3_contrib.RainbowDQN is not installed.")
-        def learn(self, *args, **kwargs):
-             raise ImportError("sb3_contrib.RainbowDQN is not installed.")
-        def save(self, *args, **kwargs):
-             raise ImportError("sb3_contrib.RainbowDQN is not installed.")
-        def predict(self, *args, **kwargs):
-             raise ImportError("sb3_contrib.RainbowDQN is not installed.")
-        @property
-        def device(self):
-             return "cpu" # Dummy device
-        def get_parameters(self):
-             return {} # Dummy params
-
+# from stable_baselines3.common.env_checker import check_env # Not used on VecEnv
+from stable_baselines3 import DQN
+# from stable_baselines3.common.env_util import make_vec_env # Not used
+from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack, DummyVecEnv
+from IPython.display import FileLink, display # Image not used directly
+# from stable_baselines3.common.callbacks import BaseCallback # Replaced by WandbCallback
 import torch
 import time
-import pygame
-# Removed unused import: PPO
+import pygame # Added for rendering in TetrisEnv
+from stable_baselines3 import PPO
 # --- Wandb Setup ---
-# os imported above
+import os
 import wandb
 from kaggle_secrets import UserSecretsClient
 # Import WandbCallback for SB3 integration
@@ -51,6 +32,19 @@ from wandb.integration.sb3 import WandbCallback
 STUDENT_ID = "113598065"
 # Set total training steps
 TOTAL_TIMESTEPS = 3000000 # INCREASED for better training
+
+# --- Wandb Login and Initialization ---
+try:
+    user_secrets = UserSecretsClient()
+    WANDB_API_KEY = user_secrets.get_secret("WANDB_API_KEY")
+    os.environ["WANDB_API_KEY"] = WANDB_API_KEY
+    wandb.login()
+    wandb_enabled = True
+    write_log("✅ Wandb 登入成功!")
+except Exception as e:
+    write_log(f"⚠️ Wandb 登入失敗 (可能是沒有設定 Secrets 或 API Key 過期): {e}. 將在沒有 Wandb 記錄的情況下執行。")
+    wandb_enabled = False
+    WANDB_API_KEY = None # Ensure it's None if not available
 def write_log(message, exc_info=False):
     """Appends a message to the log file and prints it."""
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -67,47 +61,27 @@ def write_log(message, exc_info=False):
     if exc_info:
          import traceback
          traceback.print_exc()
-# --- Wandb Login and Initialization ---
-try:
-    user_secrets = UserSecretsClient()
-    WANDB_API_KEY = user_secrets.get_secret("WANDB_API_KEY")
-    os.environ["WANDB_API_KEY"] = WANDB_API_KEY
-    wandb.login()
-    wandb_enabled = True
-    write_log("✅ Wandb 登入成功!")
-except Exception as e:
-    write_log(f"⚠️ Wandb 登入失敗 (可能是沒有設定 Secrets 或 API Key 過期): {e}. 將在沒有 Wandb 記錄的情況下執行。")
-    wandb_enabled = False
-    WANDB_API_KEY = None # Ensure it's None if not available
-
 # Start a wandb run if enabled
 # --- !!! MODIFY HYPERPARAMETERS HERE for Wandb logging if needed !!! ---
-# Using parameters specifically for RainbowDQN
 config = { # Log hyperparameters
-    "policy_type": "CnnPolicy", # RainbowDQN supports CnnPolicy
+    "policy_type": "CnnPolicy",
     "total_timesteps": TOTAL_TIMESTEPS,
     "env_id": "TetrisEnv-v1",
     "gamma": 0.99,
-    "learning_rate": 1e-4, # Common for DQN/RainbowDQN
-    "buffer_size": 500000, # Larger buffer size often helps
+    "learning_rate": 1e-4, # Common for DQN
+    "buffer_size": 500000, # Larger buffer size often helps DQN
     "learning_starts": 5000, # Start learning after sufficient random exploration
-    "batch_size": 32, # Common batch size
-    # RainbowDQN specific parameters
-    "n_step_returns": 5, # Number of steps for multi-step learning (typical values 3-10)
-    "noisy_nets": True, # Enable Noisy Nets for exploration
-    "v_min": -10.0, # Min value for Distributional RL (adjust based on expected reward range)
-    "v_max": 10.0, # Max value for Distributional RL (adjust based on expected reward range)
-    "n_quantiles": 51, # Number of quantiles for Distributional RL (typical is 51)
     "target_update_interval": 5000, # Update target network less frequently
-    "exploration_fraction": 0.5, # Still relevant if not using NoisyNets, but often reduced or ignored with it
-    "exploration_final_eps": 0.01, # Often set very low if using NoisyNets, or 0
-    "prioritized_replay": True, # Enable Prioritized Experience Replay
-    "prioritized_replay_alpha": 0.6, # Alpha parameter for PER
-    "prioritized_replay_beta0": 0.4, # Initial beta for PER (SB3 uses beta0)
-    # Removed double_dqn, it's implicit in RainbowDQN
-
+    "exploration_fraction": 0.5, # Keep exploration duration significant
+    "exploration_final_eps": 0.02, # Lower final exploration rate
+    "batch_size": 32,
     "n_stack": 4,
     "student_id": STUDENT_ID,
+    # --- Rainbow DQN parameters (Subset supported by SB3) ---
+    "prioritized_replay": True, # Enable Prioritized Experience Replay
+    "prioritized_replay_alpha": 0.6, # Alpha parameter for PER (how much priority affects sampling)
+    "prioritized_replay_beta": 0.4, # Beta parameter for PER (controls importance sampling correction)
+    "double_dqn": True, # Enable Double DQN (default is True in recent SB3, but explicit is clear)
     # --- Reward Coefficients ---
     "reward_line_clear_coeff": 100.0, # Base reward for clearing 1 line
     "penalty_height_increase_coeff": 5.0, # Penalty for height increase (per row added)
@@ -119,7 +93,7 @@ config = { # Log hyperparameters
 
 if wandb_enabled:
     run = wandb.init(
-        project="tetris-training-rainbow-dqn", # Project name
+        project="tetris-training-rainbow-dqn", # Changed project name
         entity="t113598065-ntut-edu-tw", # Replace with your Wandb entity if different
         sync_tensorboard=True,
         monitor_gym=True,
@@ -259,7 +233,7 @@ class TetrisEnv(gym.Env):
         self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 10.0)
         self.penalty_step_coeff = current_config.get("penalty_step_coeff", 0.0)
         self.penalty_game_over_coeff = current_config.get("penalty_game_over_coeff", 200.0)
-        # Densification Reward Coefficient
+        # NEW: Densification Reward Coefficient
         self.reward_height_decrease_coeff = current_config.get("reward_height_decrease_coeff", 15.0)
 
         write_log(f"TetrisEnv initialized with Reward Coeffs: Line={self.reward_line_clear_coeff}, H+={self.penalty_height_increase_coeff}, O+={self.penalty_hole_increase_coeff}, Step={self.penalty_step_coeff}, GO={self.penalty_game_over_coeff}, H-={self.reward_height_decrease_coeff}")
@@ -284,6 +258,8 @@ class TetrisEnv(gym.Env):
 
                 # Calculate scale factor to make window larger
                 scale_factor = 4
+                window_width = self.RESIZED_DIM * scale_factor
+                window_height = self.RESIZED_DIM * scale_factor
 
                 # Determine render frame source dimensions for scaling
                 # If last_raw_render_frame exists, use its shape, otherwise default
@@ -293,10 +269,9 @@ class TetrisEnv(gym.Env):
                     render_height, render_width = self.IMG_HEIGHT, self.IMG_WIDTH # Use original server dimensions
 
                 # Adjust window size based on original aspect ratio if needed,
-                # but resizing to source_dim * scale_factor is often simpler for display
+                # but resizing to RESIZED_DIM*scale_factor is often simpler for display
                 window_width = render_width * scale_factor
                 window_height = render_height * scale_factor
-
 
                 self.window_surface = pygame.display.set_mode((window_width, window_height))
                 pygame.display.set_caption(f"Tetris Env ({self.server_ip}:{self.server_port})")
@@ -480,7 +455,7 @@ class TetrisEnv(gym.Env):
                     wandb.log(filtered_log_data) # Log immediately
                 except Exception as log_e:
                      if not self._wandb_log_error_reported:
-                         write_log(f"Wandb logging error in step (send fail): {log_e}", exc_info=True)
+                         print(f"Wandb logging error in step (send fail): {log_e}")
                          self._wandb_log_error_reported = True
             # --- End logging ---
 
@@ -516,10 +491,12 @@ class TetrisEnv(gym.Env):
         if height_increase > 0:
             height_penalty = height_increase * self.penalty_height_increase_coeff
             reward -= height_penalty
-        # Reward for Height Decrease
+        # --- !!! NEW: Reward for Height Decrease !!! ---
         elif height_increase < 0:
             height_decrease_reward = (-height_increase) * self.reward_height_decrease_coeff
             reward += height_decrease_reward
+        # --- END NEW ---
+
 
         hole_increase = new_holes - self.current_holes
         if hole_increase > 0:
@@ -545,7 +522,7 @@ class TetrisEnv(gym.Env):
 
         # --- Prepare Return Values ---
         info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime}
-        truncated = False # Typically false for game over, true for time limit etc.
+        truncated = False # DQN typically doesn't use truncation like PPO
 
         if terminated:
             info['terminal_observation'] = observation.copy()
@@ -729,9 +706,9 @@ write_log("   環境建立完成並已包裝 (DummyVecEnv -> VecFrameStack -> 
 
 
 # ----------------------------
-# RainbowDQN Model Setup and Training
+# Rainbow DQN Model Setup and Training
 # ----------------------------
-write_log("🧠 設定 RainbowDQN 模型...")
+write_log("🧠 設定 Rainbow DQN 模型...")
 # Use wandb config for hyperparameters if available, otherwise use defaults from global config dict
 current_config = run.config if run else config # Use global config if no run active
 
@@ -740,25 +717,23 @@ learning_rate = current_config.get("learning_rate", 1e-4)
 buffer_size = current_config.get("buffer_size", 100000)
 learning_starts = current_config.get("learning_starts", 10000)
 batch_size = current_config.get("batch_size", 32)
-
-# --- Get RainbowDQN Specific Parameters ---
-n_step_returns = current_config.get("n_step_returns", 1) # Default to 1 if not in config
-noisy_nets = current_config.get("noisy_nets", False) # Default to False if not in config
-v_min = current_config.get("v_min", -10.0) # Default if not in config
-v_max = current_config.get("v_max", 10.0) # Default if not in config
-n_quantiles = current_config.get("n_quantiles", 51) # Default if not in config
+tau = 1.0 # Default for DQN
 target_update_interval = current_config.get("target_update_interval", 10000)
+gradient_steps = 1 # Default for DQN
+exploration_fraction = current_config.get("exploration_fraction", 0.5)
+exploration_final_eps = current_config.get("exploration_final_eps", 0.05)
 
+# --- NEW: Get Rainbow Parameters ---
 prioritized_replay = current_config.get("prioritized_replay", False)
 prioritized_replay_alpha = current_config.get("prioritized_replay_alpha", 0.6)
-prioritized_replay_beta0 = current_config.get("prioritized_replay_beta0", 0.4)
+prioritized_replay_beta = current_config.get("prioritized_replay_beta", 0.4) # Beta annealing is not a direct parameter here
+double_dqn = current_config.get("double_dqn", True)
+
+write_log(f"   Rainbow Features: Prioritized Replay={prioritized_replay}, Double DQN={double_dqn}")
 
 
-write_log(f"   RainbowDQN Features: N-Step={n_step_returns}, Noisy Nets={noisy_nets}, Distributional RL (v_min={v_min}, v_max={v_max}, quantiles={n_quantiles}), Prioritized Replay={prioritized_replay}")
-
-
-# Define RainbowDQN model
-model = RainbowDQN(
+# Define DQN model
+model = DQN(
     policy=policy_type,
     env=train_env,
     verbose=1,
@@ -767,35 +742,26 @@ model = RainbowDQN(
     buffer_size=buffer_size,
     learning_starts=learning_starts,
     batch_size=batch_size,
-    # RainbowDQN specific parameters
-    n_step_returns=n_step_returns,
-    noisy_nets=noisy_nets,
-    v_min=v_min,
-    v_max=v_max,
-    n_quantiles=n_quantiles,
-    # PER parameters (also used by base DQN, but listed here for completeness)
+    tau=tau,
+    train_freq=(1, "step"), # Train every step
+    gradient_steps=gradient_steps,
+    target_update_interval=target_update_interval,
+    exploration_fraction=exploration_fraction,
+    exploration_final_eps=exploration_final_eps,
+    # --- Add Rainbow Parameters ---
     prioritized_replay=prioritized_replay,
     prioritized_replay_alpha=prioritized_replay_alpha,
-    prioritized_replay_beta0=prioritized_replay_beta0,
-    # Note: double_dqn is NOT a parameter for RainbowDQN as it's always used
-
-    # Other common parameters
-    tau=1.0, # Target network update rate (1.0 for hard update)
-    train_freq=(1, "step"), # Train every step
-    gradient_steps=1, # Number of gradient steps per training iteration
-    target_update_interval=target_update_interval,
-    # Exploration parameters - less relevant if noisy_nets=True, but still exist
-    exploration_fraction=current_config.get("exploration_fraction", 0.5),
-    exploration_final_eps=current_config.get("exploration_final_eps", 0.01),
-
-    policy_kwargs=dict(normalize_images=False), # Keep image normalization off before policy
+    prioritized_replay_beta0=prioritized_replay_beta, # SB3 uses beta0 for initial beta
+    double_dqn=double_dqn, # Explicitly set
+    # --- End Rainbow Parameters ---
+    policy_kwargs=dict(normalize_images=False), # As per original code
     seed=42, # Set seed for reproducibility
     device="cuda" if torch.cuda.is_available() else "cpu",
     tensorboard_log=f"/kaggle/working/runs/{run_id}" if wandb_enabled else None # Log TB only if wandb enabled
 )
 write_log(f"   模型建立完成. Device: {model.device}")
 # write_log(f"   使用的超參數: {model.get_parameters()['policy']}") # Log actual policy params used
-write_log(f"   使用的模型超參數: gamma={model.gamma}, lr={model.lr}, buffer_size={model.buffer_size}, learning_starts={model.learning_starts}, batch_size={model.batch_size}, n_step_returns={model.n_step_returns}, noisy_nets={model.noisy_nets}, v_min={model.v_min}, v_max={model.v_max}, n_quantiles={model.n_quantiles}, prioritized_replay={model.prioritized_replay}, prioritized_replay_alpha={model.prioritized_replay_alpha}, prioritized_replay_beta0={model.prioritized_replay_beta0}, target_update_interval={model.target_update_interval}, exploration_fraction={model.exploration_fraction}, exploration_final_eps={model.exploration_final_eps}")
+write_log(f"   使用的模型超參數: gamma={model.gamma}, lr={model.lr}, buffer_size={model.buffer_size}, learning_starts={model.learning_starts}, batch_size={model.batch_size}, tau={model.tau}, target_update_interval={model.target_update_interval}, exploration_fraction={model.exploration_fraction}, exploration_final_eps={model.exploration_final_eps}, prioritized_replay={model.prioritized_replay}, prioritized_replay_alpha={model.prioritized_replay_alpha}, prioritized_replay_beta0={model.prioritized_replay_beta0}, double_dqn={model.double_dqn}")
 
 
 # Setup Wandb callback if enabled
@@ -828,19 +794,19 @@ try:
 except Exception as e:
      write_log(f"❌ 訓練過程中發生錯誤: {e}", exc_info=True) # Log exception info
      # Save model before exiting if error occurs mid-training
-     error_save_path = f'/kaggle/working/{STUDENT_ID}_rainbowdqn_error_save_{run_id}.zip' # Include run_id and updated name
+     error_save_path = f'/kaggle/working/{STUDENT_ID}_dqn_error_save_{run_id}.zip' # Include run_id
      try:
          model.save(error_save_path)
          write_log(f"   模型已嘗試儲存至 {error_save_path}")
          if wandb_enabled and run: wandb.save(error_save_path) # Upload error model to wandb
      except Exception as save_e:
           write_log(f"   ❌ 儲存錯誤模型時也發生錯誤: {save_e}")
-     if run: run.finish(exit_code=1, quiet=True) # Ensure wandb run is marked as failed
+     if run: run.finish(exit_code=1, quiet=True) # Finish wandb run with error code
 
 # --- Save Final Model (only if training completed successfully) ---
 if training_successful:
     stats_path = f"/kaggle/working/vecnormalize_stats_{run_id}.pkl"
-    final_model_name = f'{STUDENT_ID}_rainbowdqn_final_{run_id}.zip' # Updated name
+    final_model_name = f'{STUDENT_ID}_dqn_final_{run_id}.zip'
     final_model_path = os.path.join("/kaggle/working", final_model_name)
 
     try:
@@ -850,7 +816,7 @@ if training_successful:
 
         model.save(final_model_path)
         write_log(f"✅ 最終模型已儲存: {final_model_path}")
-        # display(FileLink(final_model_path)) # Removed for cleaner output in console
+        display(FileLink(final_model_path))
         if wandb_enabled and run: wandb.save(final_model_path) # Upload final model to wandb
 
     except Exception as e:
@@ -867,8 +833,7 @@ if training_successful:
     # Create a separate evaluation environment
     eval_env = None # Initialize eval_env to None
     try:
-        # make_env needs to be defined before this block
-        eval_env_base = DummyVecEnv([lambda: make_env()]) # Use lambda to ensure fresh env instance
+        eval_env_base = DummyVecEnv([make_env]) # Make a fresh env instance
 
         # Wrap with FrameStack FIRST, same as training
         # Use wandb config if available, otherwise use default from global config
@@ -918,23 +883,12 @@ if training_successful:
                     if i == 0:
                         try:
                             # Access the underlying TetrisEnv instance
-                            # VecNormalize wraps VecFrameStack wraps DummyVecEnv wraps TetrisEnv
-                            # Need to get past the layers
-                            current_env = eval_env
-                            while hasattr(current_env, 'env') or hasattr(current_env, 'envs'):
-                                if hasattr(current_env, 'envs'): # For DummyVecEnv
-                                    current_env = current_env.envs[0]
-                                elif hasattr(current_env, 'env'): # For VecNormalize, VecFrameStack
-                                     current_env = current_env.env
-
-                            # Now current_env should be the base TetrisEnv
-                            if isinstance(current_env, TetrisEnv):
-                                raw_frame = current_env.render(mode="rgb_array")
-                                if raw_frame is not None:
-                                    frames.append(raw_frame)
-                            else:
-                                write_log(f"⚠️ 評估時未能獲取原始 TetrisEnv 實例進行渲染. Got type: {type(current_env)}")
-
+                            # Note: get_attr might return a list if using SubprocVecEnv, but here DummyVecEnv has one env
+                            # We need the base TetrisEnv to call render('rgb_array') for the original frame
+                            base_env_instance = eval_env.get_attr("envs")[0].env.envs[0].env # Navigate through wraps
+                            raw_frame = base_env_instance.render(mode="rgb_array")
+                            if raw_frame is not None:
+                                frames.append(raw_frame)
                         except Exception as render_err:
                             write_log(f"⚠️ 評估時獲取渲染幀出錯: {render_err}")
 
@@ -994,7 +948,7 @@ if training_successful:
                      if valid_frames:
                          imageio.mimsave(gif_path, valid_frames, fps=15, loop=0)
                          write_log("   GIF 儲存成功.")
-                         # display(FileLink(gif_path)) # Removed for cleaner output
+                         display(FileLink(gif_path))
                          if wandb_enabled and run:
                              # Log GIF to Wandb, ensure path is correct for upload
                              wandb.log({"eval/replay": wandb.Video(gif_path, fps=15, format="gif")})
@@ -1018,7 +972,7 @@ if training_successful:
                               fs.write(f'eval_avg,{mean_lines:.2f},{mean_lifetime:.2f},{mean_reward:.2f}\n')
 
                      write_log(f"✅ 評估分數 CSV 已儲存: {csv_path}")
-                     # display(FileLink(csv_path)) # Removed for cleaner output
+                     display(FileLink(csv_path))
                      if wandb_enabled and run: wandb.save(csv_path) # Upload CSV to wandb
                  except Exception as e: write_log(f"   ❌ 儲存 CSV 時發生錯誤: {e}")
             else:
@@ -1063,13 +1017,16 @@ else:
 # Finish the Wandb run if it was initialized and training didn't crash early
 if run: # Check if run object exists
     # Check run.is_running before finishing again to avoid errors if already finished
-    # This check is not strictly needed with the finish(exit_code=1) in error handling,
-    # but doesn't hurt.
-    # if hasattr(run, 'is_running') and run.is_running():
+    if hasattr(run, 'is_running') and run.is_running():
          run.finish()
          write_log("✨ Wandb run finished.")
-    # else: # The run was likely finished in the exception handler
-    #    pass # No need to print error message again
+    elif not hasattr(run, 'is_running'):
+        # Fallback for older wandb versions or unusual states
+        try:
+            run.finish()
+            write_log("✨ Wandb run finished (fallback).")
+        except Exception:
+            write_log("✨ Wandb run likely already finished or encountered error finishing.")
 
 
 write_log("🏁 腳本執行完畢.")
