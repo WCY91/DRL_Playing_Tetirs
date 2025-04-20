@@ -664,7 +664,6 @@ model = DQN(
     learning_rate=learning_rate,
     replay_buffer_class=PrioritizedReplayBuffer,
     replay_buffer_kwargs={
-        "buffer_size": 100_000,
         "alpha": 0.6,
         "epsilon": 1e-6,
         # for importance sampling
