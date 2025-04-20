@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>簡單俄羅斯方塊</title>
+<style>
+    body {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        background-color: #f0f0f0;
+        margin: 0;
+        font-family: sans-serif;
+    }
+
+    #game-container {
+        text-align: center;
+    }
+
+    #game-board {
+        display: grid;
+        /* 這裡設定了網格的列數，根據遊戲板寬度來定 */
+        /* --grid-cols 會在 JS 中設定 */
+        grid-template-columns: repeat(var(--grid-cols), 25px); /* 每個方格寬度25px */
+        grid-template-rows: repeat(var(--grid-rows), 25px); /* 每個方格高度25px */
+        gap: 1px; /* 方格之間的間隔 */
+        border: 5px solid #333;
+        background-color: #000;
+        margin: 0 auto;
+    }
+
+    .grid-cell {
+        width: 25px;
+        height: 25px;
+        background-color: #111; /* 空白方格的顏色 */
+        box-sizing: border-box; /* 讓邊框和內距不影響元素尺寸 */
+    }
+
+    /* 不同方塊的顏色 */
+    .piece-I { background-color: cyan; border: 1px solid #00ffff; }
+    .piece-J { background-color: blue; border: 1px solid #0000ff; }
+    .piece-L { background-color: orange; border: 1px solid #ffa500; }
+    .piece-O { background-color: yellow; border: 1px solid #ffff00; }
+    .piece-S { background-color: limegreen; border: 1px solid #32cd32; }
+    .piece-T { background-color: purple; border: 1px solid #800080; }
+    .piece-Z { background-color: red; border: 1px solid #ff0000; }
+
+    /* 鎖定後的方塊顏色會應用 .locked class */
+    .locked { border: 1px solid rgba(0,0,0,0.2); } /* 鎖定後邊框變淡 */
+
+    /* 可選：顯示分數 */
+    #score {
+        margin-top: 10px;
+        font-size: 1.2em;
+        color: #333;
+    }
+</style>
+</head>
+<body>
+
+<div id="game-container">
+    <h1>簡單俄羅斯方塊</h1>
+    <div id="game-board">
+        </div>
+    <div id="score">分數: 0</div>
+</div>
+
+<script>
+    const board = document.getElementById('game-board');
+    const scoreDisplay = document.getElementById('score');
+    const COLS = 10; // 遊戲板列數
+    const ROWS = 20; // 遊戲板行數
+    const CELL_SIZE = 25; // 方格大小 (px)
+    let gameBoard = []; // 二維陣列，儲存遊戲板狀態 (0: 空白, 1-7: 不同方塊類型)
+    let currentPiece = null; // 當前正在下落的方塊
+    let currentPosition = 0; // 當前方塊在 gameBoard 陣列中的起始索引
+    let score = 0;
+    let timerId = null; // 下落定時器 ID
+    const speed = 500; // 下落速度 (毫秒)
+
+    // 設定 CSS 變數，方便在 CSS 中使用
+    board.style.setProperty('--grid-cols', COLS);
+    board.style.setProperty('--grid-rows', ROWS);
+
+    // 所有俄羅斯方塊的形狀及其顏色類別
+    const tetrominoes = [
+        [
+            [1, COLS, COLS*2, COLS*3], // I
+            [COLS, COLS + 1, COLS + 2, COLS + 3]
+        ],
+        [
+            [1, COLS + 1, COLS*2 + 1, COLS*2], // J
+            [COLS, COLS + 1, COLS + 2, 2],
+            [1, COLS + 1, COLS*2 + 1, COLS*2 + 2],
+            [COLS, COLS + 1, COLS + 2, COLS * 2]
+        ],
+        [
+            [COLS*2 + 1, COLS + 1, 1, 2], // L
+            [COLS, COLS + 1, COLS + 2, COLS * 2 + 2],
+            [1, COLS + 1, COLS*2 + 1, COLS*2],
+            [COLS, COLS + 1, COLS + 2, 2]
+        ],
+        [
+            [0, 1, COLS, COLS + 1], // O
+            [0, 1, COLS, COLS + 1] // O 形只有一種方向
+        ],
+        [
+            [COLS, COLS + 1, 1, 2], // S
+            [0, COLS, COLS + 1, COLS*2 + 1]
+        ],
+        [
+            [1, COLS, COLS + 1, COLS + 2], // T
+            [1, COLS + 1, COLS + 2, COLS * 2 + 1],
+            [COLS, COLS + 1, COLS + 2, COLS*2 + 1],
+            [1, COLS, COLS + 1, COLS * 2 + 1]
+        ],
+        [
+            [0, COLS, COLS + 1, COLS*2 + 1], // Z
+            [COLS + 1, COLS + 2, COLS*2, COLS*2 + 1]
+        ]
+    ];
+
+    const pieceClasses = ['piece-I', 'piece-J', 'piece-L', 'piece-O', 'piece-S', 'piece-T', 'piece-Z'];
+
+    // 創建遊戲板
+    function createBoard() {
+        for (let i = 0; i < COLS * ROWS; i++) {
+            const cell = document.createElement('div');
+            cell.classList.add('grid-cell');
+            // 可以根據需要給每個 cell 添加索引或其他屬性
+            // cell.dataset.index = i;
+            board.appendChild(cell);
+            gameBoard.push(0); // 初始化遊戲板狀態為 0 (空白)
+        }
+    }
+
+    // 繪製遊戲板狀態到 HTML
+    function drawBoard() {
+        const cells = document.querySelectorAll('.grid-cell');
+        for (let i = 0; i < COLS * ROWS; i++) {
+            cells[i].className = 'grid-cell'; // 重置所有 class
+            cells[i].classList.add('grid-cell');
+            if (gameBoard[i] > 0) {
+                cells[i].classList.add(pieceClasses[gameBoard[i] - 1]);
+                cells[i].classList.add('locked'); // 鎖定後的方塊有 locked class
+            }
+        }
+
+        // 繪製當前下落的方塊 (如果存在)
+        if (currentPiece) {
+             currentPiece.shape.forEach(index => {
+                const cellIndex = currentPosition + index;
+                if (cellIndex >= 0 && cellIndex < COLS * ROWS) { // 確保索引有效
+                     cells[cellIndex].classList.add(pieceClasses[currentPiece.type]);
+                }
+            });
+        }
+    }
+
+    // 產生一個新的方塊
+    function generatePiece() {
+        const randomType = Math.floor(Math.random() * tetrominoes.length);
+        const randomRotation = Math.floor(Math.random() * tetrominoes[randomType].length);
+        currentPiece = {
+            type: randomType, // 方塊類型索引 (0-6)
+            shape: tetrominoes[randomType][randomRotation], // 當前形狀 (一系列索引偏移)
+            rotation: randomRotation // 當前旋轉狀態索引
+        };
+        // 新方塊出現在頂部中間
+        currentPosition = Math.floor(COLS / 2) - Math.floor(currentPiece.shape.reduce((min, val) => Math.min(min, val % COLS), COLS) / 2); // 調整初始水平位置使其居中
+         if (currentPosition < 0) currentPosition = 0;
+
+
+        // 檢查新方塊生成後是否立即碰撞 (遊戲結束)
+        if (!isValidPosition(currentPiece.shape, currentPosition)) {
+            console.log("遊戲結束！");
+            // TODO: 實現遊戲結束邏輯 (停止計時器, 顯示結束訊息等)
+            clearInterval(timerId);
+             document.removeEventListener('keydown', handleKeyPress); // 移除鍵盤監聽
+             alert("遊戲結束！您的分數是：" + score); // 簡單提示
+             // 可以選擇重新開始遊戲
+             // location.reload();
+             return false; // 表示遊戲結束
+        }
+         return true; // 表示成功生成新方塊
+    }
+
+    // 檢查當前方塊在給定位置和形狀下是否有效 (不超出邊界或與已鎖定的方塊重疊)
+    function isValidPosition(shape, pos) {
+        return shape.every(index => {
+            const cellIndex = pos + index;
+            // 檢查是否超出左右邊界 (只有當前行)
+            const isGoingLeft = (index % COLS) + (pos % COLS) < (pos % COLS); // 檢查是否向左移動出了邊界
+            const isGoingRight = (index % COLS) + (pos % COLS) >= COLS; // 檢查是否向右移動出了邊界
+            if (isGoingLeft || isGoingRight) {
+                return false;
+            }
+
+            // 檢查是否超出下邊界
+            if (cellIndex >= COLS * ROWS) return false;
+
+            // 檢查是否與已鎖定的方塊重疊
+            if (gameBoard[cellIndex] > 0) return false;
+
+            return true;
+        });
+    }
+
+
+    // 移動方塊
+    function movePiece(direction) {
+        // 移除舊的方塊繪製
+        // (在 isValidPosition 內部不需要，因為每次都會重新繪製整個板)
+
+        const originalPosition = currentPosition;
+        currentPosition += direction;
+
+        // 檢查移動後是否有效
+        if (!isValidPosition(currentPiece.shape, currentPosition)) {
+            currentPosition = originalPosition; // 如果無效，回到原位
+
+            // 如果是向下移動並且無效，表示到底或碰到方塊，需要鎖定方塊
+            if (direction === COLS) {
+                lockPiece();
+            }
+             return false; // 移動失敗
+        }
+
+        // 如果移動有效，重新繪製板
+        drawBoard();
+        return true; // 移動成功
+    }
+
+    // 旋轉方塊
+    function rotatePiece() {
+        // 移除舊的方塊繪製
+        // (在 isValidPosition 內部不需要，因為每次都會重新繪製整個板)
+
+        const originalRotation = currentPiece.rotation;
+        const originalShape = currentPiece.shape;
+
+        // 計算下一個旋轉狀態的索引
+        const nextRotation = (currentPiece.rotation + 1) % tetrominoes[currentPiece.type].length;
+        const nextShape = tetrominoes[currentPiece.type][nextRotation];
+
+        // 檢查旋轉後的有效性
+        if (isValidPosition(nextShape, currentPosition)) {
+            currentPiece.shape = nextShape;
+            currentPiece.rotation = nextRotation;
+             drawBoard(); // 旋轉有效，重新繪製板
+        } else {
+            // 如果旋轉無效，可以嘗試 Wall Kick 機制（這個簡單版本暫不實現）
+            // 這裡只簡單地不做旋轉
+        }
+    }
+
+    // 鎖定方塊到遊戲板
+    function lockPiece() {
+        currentPiece.shape.forEach(index => {
+            const cellIndex = currentPosition + index;
+            if (cellIndex >= 0 && cellIndex < COLS * ROWS) {
+                gameBoard[cellIndex] = currentPiece.type + 1; // 將方塊類型記錄到 gameBoard (1-7)
+            }
+        });
+
+        checkLines(); // 檢查是否有滿行可以消除
+        generatePiece(); // 生成下一個方塊
+        drawBoard(); // 重新繪製板
+    }
+
+    // 檢查並消除滿行
+    function checkLines() {
+        let linesCleared = 0;
+        for (let r = ROWS - 1; r >= 0; r--) {
+            let rowIsFull = true;
+            for (let c = 0; c < COLS; c++) {
+                const index = r * COLS + c;
+                if (gameBoard[index] === 0) {
+                    rowIsFull = false;
+                    break;
+                }
+            }
+
+            if (rowIsFull) {
+                linesCleared++;
+                // 消除整行，將上面行的內容向下移動
+                // 方法1: 直接從 gameBoard 陣列中移除這一行，然後在最頂部添加一個空行
+                gameBoard.splice(r * COLS, COLS); // 移除當前行
+                const newRow = Array(COLS).fill(0);
+                gameBoard.unshift(...newRow); // 在頂部添加新行 (使用 unshift 將其放在前面)
+
+                // 由於移除了行，需要重新檢查當前 r 行，因為它現在是新的內容
+                r++; // 保持 r 不變，以便下次循環檢查新的這一行
+            }
+        }
+
+        if (linesCleared > 0) {
+            // 根據消除的行數增加分數 (簡單計分)
+            score += linesCleared * 100;
+            scoreDisplay.textContent = '分數: ' + score;
+            // 可以根據分數或消除的行數增加遊戲速度 timerId = setInterval(moveDown, speed);
+        }
+    }
+
+    // 方塊自動向下移動
+    function moveDown() {
+        if (!movePiece(COLS)) { // 向下移動一格 (索引 + COLS)
+             // 如果向下移動失敗 (到底或碰到方塊)，則鎖定
+             lockPiece();
+        }
+    }
+
+    // 鍵盤事件處理器
+    function handleKeyPress(e) {
+        if (!currentPiece) return; // 如果沒有方塊，不做任何事
+
+        switch (e.key) {
+            case 'ArrowLeft':
+                movePiece(-1); // 向左移動 (索引 - 1)
+                break;
+            case 'ArrowRight':
+                movePiece(1); // 向右移動 (索引 + 1)
+                break;
+            case 'ArrowDown':
+                 // 加速下落，並且立即嘗試再次下落直到無法下落
+                 // 清除當前計時器，重新開始
+                clearInterval(timerId);
+                moveDown(); // 立即向下移動一步
+                timerId = setInterval(moveDown, speed); // 重新設定計時器 (如果需要加速，這裡可以設定更短的時間)
+                break;
+            case 'ArrowUp':
+                 rotatePiece(); // 旋轉
+                break;
+             case ' ': // 空格鍵快速下落到底
+                 while(movePiece(COLS)) {
+                    // 不斷向下移動直到移動失敗 (碰到障礙)
+                 }
+                 lockPiece(); // 鎖定方塊
+                 // 快速下落後需要重新啟動自動下落計時器
+                 clearInterval(timerId);
+                 timerId = setInterval(moveDown, speed);
+                 break;
+        }
+    }
+
+    // 遊戲初始化
+    function startGame() {
+        createBoard(); // 創建 HTML 遊戲板元素
+        if(generatePiece()) { // 生成第一個方塊並檢查是否遊戲結束
+            drawBoard(); // 繪製初始狀態
+            timerId = setInterval(moveDown, speed); // 啟動自動下落計時器
+            document.addEventListener('keydown', handleKeyPress); // 監聽鍵盤事件
+        }
+    }
+
+    // 頁面載入完成後啟動遊戲
+    document.addEventListener('DOMContentLoaded', startGame);
+
+</script>
+
+</body>
+</html>
