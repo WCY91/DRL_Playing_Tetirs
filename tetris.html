@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>簡單俄羅斯方塊</title>
+    <style>
+        canvas {
+            border: 2px solid #333;
+            background: #f0f0f0;
+        }
+        .game-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .score {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <div class="score">分數: <span id="score">0</span></div>
+        <canvas id="tetris" width="300" height="600"></canvas>
+    </div>
+
+<script>
+const canvas = document.getElementById('tetris');
+const ctx = canvas.getContext('2d');
+const scoreElement = document.getElementById('score');
+
+// 遊戲配置
+const BLOCK_SIZE = 30;
+const COLS = 10;
+const ROWS = 20;
+let score = 0;
+
+// 方塊形狀定義
+const SHAPES = [
+    [[1, 1, 1, 1]],                    // I
+    [[1, 1], [1, 1]],                  // O
+    [[1, 1, 1], [0, 1, 0]],           // T
+    [[1, 1, 1], [1, 0, 0]],           // L
+    [[1, 1, 1], [0, 0, 1]],           // J
+    [[1, 1, 0], [0, 1, 1]],           // S
+    [[0, 1, 1], [1, 1, 0]]            // Z
+];
+
+// 顏色定義
+const COLORS = [
+    '#FF0D72', '#0DC2FF', '#0DFF72',
+    '#F538FF', '#FF8E0D', '#FFE138',
+    '#3877FF'
+];
+
+let board = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+let gameOver = false;
+
+// 當前方塊
+let currentPiece = {
+    pos: {x: 0, y: 0},
+    shape: null,
+    color: null
+};
+
+// 創建新方塊
+function createPiece() {
+    const shapeIndex = Math.floor(Math.random() * SHAPES.length);
+    currentPiece = {
+        pos: {x: Math.floor(COLS / 2) - 1, y: 0},
+        shape: SHAPES[shapeIndex],
+        color: COLORS[shapeIndex]
+    };
+}
+
+// 繪製方塊
+function drawBlock(x, y, color) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x * BLOCK_SIZE, y * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    ctx.strokeStyle = '#000';
+    ctx.strokeRect(x * BLOCK_SIZE, y * BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+}
+
+// 繪製遊戲板
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // 繪製已固定的方塊
+    board.forEach((row, y) => {
+        row.forEach((value, x) => {
+            if (value) {
+                drawBlock(x, y, value);
+            }
+        });
+    });
+
+    // 繪製當前方塊
+    currentPiece.shape.forEach((row, y) => {
+        row.forEach((value, x) => {
+            if (value) {
+                drawBlock(x + currentPiece.pos.x, y + currentPiece.pos.y, currentPiece.color);
+            }
+        });
+    });
+}
+
+// 碰撞檢測
+function collision() {
+    return currentPiece.shape.some((row, y) => {
+        return row.some((value, x) => {
+            if (!value) return false;
+            const newX = x + currentPiece.pos.x;
+            const newY = y + currentPiece.pos.y;
+            return newX < 0 || newX >= COLS || newY >= ROWS ||
+                   (newY >= 0 && board[newY][newX]);
+        });
+    });
+}
+
+// 固定當前方塊
+function merge() {
+    currentPiece.shape.forEach((row, y) => {
+        row.forEach((value, x) => {
+            if (value) {
+                const newY = y + currentPiece.pos.y;
+                const newX = x + currentPiece.pos.x;
+                if (newY >= 0) {
+                    board[newY][newX] = currentPiece.color;
+                }
+            }
+        });
+    });
+}
+
+// 清除完整行
+function clearLines() {
+    let linesCleared = 0;
+    
+    outer: for (let y = ROWS - 1; y >= 0; y--) {
+        for (let x = 0; x < COLS; x++) {
+            if (!board[y][x]) continue outer;
+        }
+
+        board.splice(y, 1);
+        board.unshift(Array(COLS).fill(0));
+        linesCleared++;
+        y++;
+    }
+
+    if (linesCleared > 0) {
+        score += linesCleared * 100;
+        scoreElement.textContent = score;
+    }
+}
+
+// 移動方塊
+function move(dir) {
+    currentPiece.pos.x += dir;
+    if (collision()) {
+        currentPiece.pos.x -= dir;
+    }
+}
+
+// 旋轉方塊
+function rotate() {
+    const original = currentPiece.shape;
+    const rotated = currentPiece.shape[0].map((_, i) =>
+        currentPiece.shape.map(row => row[i]).reverse()
+    );
+    
+    currentPiece.shape = rotated;
+    if (collision()) {
+        currentPiece.shape = original;
+    }
+}
+
+// 下降
+function drop() {
+    currentPiece.pos.y++;
+    if (collision()) {
+        currentPiece.pos.y--;
+        merge();
+        clearLines();
+        createPiece();
+        if (collision()) {
+            gameOver = true;
+            alert('遊戲結束！得分：' + score);
+            board = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+            score = 0;
+            scoreElement.textContent = score;
+            gameOver = false;
+        }
+    }
+}
+
+// 遊戲循環
+let dropCounter = 0;
+let lastTime = 0;
+
+function update(time = 0) {
+    const deltaTime = time - lastTime;
+    lastTime = time;
+    dropCounter += deltaTime;
+
+    if (dropCounter > 1000) {
+        drop();
+        dropCounter = 0;
+    }
+
+    draw();
+    requestAnimationFrame(update);
+}
+
+// 鍵盤控制
+document.addEventListener('keydown', event => {
+    if (gameOver) return;
+
+    switch(event.keyCode) {
+        case 37: // 左箭頭
+            move(-1);
+            break;
+        case 39: // 右箭頭
+            move(1);
+            break;
+        case 40: // 下箭頭
+            drop();
+            break;
+        case 38: // 上箭頭
+            rotate();
+            break;
+    }
+});
+
+// 開始遊戲
+createPiece();
+update();
+</script>
+</body>
+</html>
