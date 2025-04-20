@@ -667,7 +667,6 @@ model = DQN(
         "alpha": 0.6,
         "epsilon": 1e-6,
         # for importance sampling
-        "beta": 0.4,
         # other ReplayBuffer args if needed…
     },
     buffer_size=buffer_size,
