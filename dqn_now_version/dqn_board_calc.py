@@ -4,6 +4,7 @@ import socket
 import cv2
 # import matplotlib.pyplot as plt # Matplotlib not strictly needed for core logic
 import subprocess
+from collections import deque
 import os
 import shutil
 import glob
@@ -50,10 +51,10 @@ config = { # Log hyperparameters
     "policy_type": "CnnPolicy",
     "total_timesteps": TOTAL_TIMESTEPS,
     "env_id": "TetrisEnv-v1-ShapedReward", # Updated env id for clarity
-    "gamma": 0.85,
+    "gamma": 0.95,
     "learning_rate": 5e-4,
     "buffer_size": 200000,
-    "learning_starts": 100,
+    "learning_starts": 5000,
     "target_update_interval": 1500,
     "exploration_fraction": 0.1, # <<< INCREASED exploration duration
     "exploration_final_eps": 0.08, # Kept final exploration rate
@@ -70,7 +71,7 @@ config = { # Log hyperparameters
     "penalty_height_increase_coeff": 45,
     "penalty_hole_increase_coeff": 20,
     "penalty_step_coeff": 0.5,          # Set to zero as per previous config
-    "penalty_game_over_coeff": 500.0
+    "penalty_game_over_coeff": 3500.0
 }
 
 if wandb_enabled:
@@ -193,7 +194,7 @@ class TetrisEnv(gym.Env):
         current_config = run.config if run else config
         self.eval_a = current_config.get("eval_hole_coeff", 50.0)        # a
         self.eval_b = current_config.get("eval_bumpiness_coeff", 3.5)   # b
-        self.eval_c = current_config.get("eval_height_coeff", 30)      # c
+        self.eval_c = current_config.get("eval_height_coeff", 60)      # c
         self.eval_weight = current_config.get("eval_delta_weight", 1.3) # 乘到 reward
 
         self.prev_board_cost = 0.0   # 用來存上一步板面 cost
@@ -207,12 +208,12 @@ class TetrisEnv(gym.Env):
         self.reward_line_clear_2_coeff = current_config.get("reward_line_clear_2_coeff", 400.0)
         self.reward_line_clear_3_coeff = current_config.get("reward_line_clear_3_coeff", 900.0)
         self.reward_line_clear_4_coeff = current_config.get("reward_line_clear_4_coeff", 2500.0) # Tetris bonus
-
+        self.max_h_trend = deque(maxlen=5)
         # Coefficient for drop action reward (Dense reward)
         # Note: This rewards the *action* of dropping, not the distance dropped,
         # as distance information is not directly available from the server.
         self.reward_drop_action_coeff = current_config.get("reward_drop_action_coeff", 0.1)
-        self.reward_move_action_coeff = current_config.get("reward_move_action_coeff", 2)
+        self.reward_move_action_coeff = current_config.get("reward_move_action_coeff", 30)
         # Penalty coefficients (as before, adjusted values)
         self.penalty_height_increase_coeff = current_config.get("penalty_height_increase_coeff", 7.5)
         self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 12.5)
@@ -250,7 +251,9 @@ class TetrisEnv(gym.Env):
         # 估 10 列高度
         col_heights = []
         for i in range(10):
-            col = img[:, i*grid_w:(i+1)*grid_w]
+            start = i * grid_w
+            end = (i + 1) * grid_w if i < 9 else 84  # 最後一欄補到 84，避免落掉最後一列像素
+            col = img[:, start:end]
             rows = np.where(col.any(axis=1))[0]
             h = 0 if len(rows) == 0 else (img.shape[0] - rows[0])
             col_heights.append(h)
@@ -258,10 +261,11 @@ class TetrisEnv(gym.Env):
         aggregate_h = sum(col_heights)
         bumpiness = sum(abs(np.diff(col_heights)))
 
+        max_h = max(col_heights)
         cost = (self.eval_a * holes +
                 self.eval_b * bumpiness +
-                self.eval_c * aggregate_h)
-        return cost
+                self.eval_c * max_h)
+        return cost , max_h
 
     def _initialize_pygame(self):
         """Initializes Pygame if not already done."""
@@ -442,20 +446,20 @@ class TetrisEnv(gym.Env):
         # --- Calculate Reward ---
         reward = 0.0
         lines_cleared_this_step = new_lines_removed - self.lines_removed
-        current_cost = self._compute_board_cost(observation, new_holes, new_height)
+        current_cost , max_h = self._compute_board_cost(observation, new_holes, new_height)
         cost_diff = self.prev_board_cost - current_cost   # cost 下降 ⇒ 正值
-        reward += self.eval_weight * cost_diff
+        reward += self.eval_weight * cost_diff * 0.7
         self.prev_board_cost = current_cost
         # --- !!! NEW: Reward for 'drop' action !!! ---
         drop_action_reward = 0.0
         if action == 4: # Check if the action taken was 'drop'
-            drop_action_reward = self.reward_drop_action_coeff
+            drop_action_reward = self.reward_drop_action_coeff * 0.5
             reward += drop_action_reward
         # --- END NEW ---
         move_action_reward = 0.0
         if action == 0 or action == 1:
             move_action_reward = self.reward_move_action_coeff
-            reward += move_action_reward*5
+            reward += move_action_reward*1.8
         # --- !!! NEW: Smoother multi-line clear reward logic !!! ---
         line_clear_reward = 0.0
         if lines_cleared_this_step == 1:
@@ -484,13 +488,20 @@ class TetrisEnv(gym.Env):
             )
         reward += line_clear_reward
         # --- END NEW ---
-
+        self.max_h_trend.append(max_h)
+        if len(self.max_h_trend) == 5 and all(h > 55 for h in self.max_h_trend):
+            penalty = min(100 * len([h for h in self.max_h_trend if h > 55]), 500)
+            reward -= penalty
+        if len(self.max_h_trend) == 5 and self.max_h_trend[-1] < self.max_h_trend[0]:
+            reward += 150  # 鼓勵降低高度
+        if max_h > 70:
+            reward -= (max_h - 70) * 10
         # --- Penalties (Height, Holes, Step, Game Over) ---
         height_increase = new_height - self.current_height
         height_penalty = 0.0
         if height_increase > 0:
             height_penalty = height_increase * self.penalty_height_increase_coeff
-            reward -= height_penalty
+            reward -= 1.5*height_penalty
 
         hole_increase = new_holes - self.current_holes
         hole_penalty = 0.0
