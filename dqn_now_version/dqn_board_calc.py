@@ -14,7 +14,7 @@ from gymnasium import spaces
 from stable_baselines3 import DQN
 # from stable_baselines3.common.env_util import make_vec_env # Not used
 from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack, DummyVecEnv
-from IPython.display import FileLink, display # Image not used directly
+
 # from stable_baselines3.common.callbacks import BaseCallback # Replaced by WandbCallback
 import torch
 import time
@@ -23,7 +23,6 @@ from stable_baselines3 import PPO
 # --- Wandb Setup ---
 import os
 import wandb
-from kaggle_secrets import UserSecretsClient
 # Import WandbCallback for SB3 integration
 from wandb.integration.sb3 import WandbCallback
 
@@ -31,13 +30,11 @@ from wandb.integration.sb3 import WandbCallback
 # Set your student ID here for filenames
 STUDENT_ID = "113598065"
 # Set total training steps
-TOTAL_TIMESTEPS = 600000 # Adjust as needed (e.g., 1M, 2M, 5M)
+TOTAL_TIMESTEPS = 3500000 # Adjust as needed (e.g., 1M, 2M, 5M)
 
 
 # --- Wandb Login and Initialization ---
 try:
-    user_secrets = UserSecretsClient()
-    WANDB_API_KEY = user_secrets.get_secret("WANDB_API_KEY")
     os.environ["WANDB_API_KEY"] = WANDB_API_KEY
     wandb.login()
     wandb_enabled = True
@@ -53,13 +50,13 @@ config = { # Log hyperparameters
     "policy_type": "CnnPolicy",
     "total_timesteps": TOTAL_TIMESTEPS,
     "env_id": "TetrisEnv-v1-ShapedReward", # Updated env id for clarity
-    "gamma": 0.95,
+    "gamma": 0.85,
     "learning_rate": 5e-4,
     "buffer_size": 200000,
     "learning_starts": 100,
     "target_update_interval": 1500,
     "exploration_fraction": 0.1, # <<< INCREASED exploration duration
-    "exploration_final_eps": 0.03, # Kept final exploration rate
+    "exploration_final_eps": 0.08, # Kept final exploration rate
     "batch_size": 64,
     "n_stack": 4,
     "student_id": STUDENT_ID,
@@ -70,10 +67,10 @@ config = { # Log hyperparameters
     "reward_line_clear_3_coeff": 500.0,    # NEW: Reward for clearing 3 lines (adjust as needed)
     "reward_line_clear_4_coeff": 800.0,   # NEW: Reward for clearing 4+ lines (Tetris) (adjust as needed)
     "reward_drop_action_coeff": 0.5,     # NEW: Small reward for using the 'drop' action (adjust as needed)
-    "penalty_height_increase_coeff": 1.5,
-    "penalty_hole_increase_coeff": 1.2,
+    "penalty_height_increase_coeff": 45,
+    "penalty_hole_increase_coeff": 20,
     "penalty_step_coeff": 0.5,          # Set to zero as per previous config
-    "penalty_game_over_coeff": 20.0
+    "penalty_game_over_coeff": 500.0
 }
 
 if wandb_enabled:
@@ -91,7 +88,7 @@ else:
     run_id = f"local_{int(time.time())}" # Create a local ID for paths
 
 
-log_path = f"/kaggle/working/tetris_train_log_{run_id}.txt"
+log_path = f"./kaggle/working/tetris_train_log_{run_id}.txt"
 
 def write_log(message):
     """Appends a message to the log file and prints it."""
@@ -194,10 +191,10 @@ class TetrisEnv(gym.Env):
         self.lifetime = 0
         self.last_observation = np.zeros(self.observation_space.shape, dtype=np.uint8)
         current_config = run.config if run else config
-        self.eval_a = current_config.get("eval_hole_coeff", 1.0)        # a
-        self.eval_b = current_config.get("eval_bumpiness_coeff", 0.5)   # b
-        self.eval_c = current_config.get("eval_height_coeff", 0.2)      # c
-        self.eval_weight = current_config.get("eval_delta_weight", 1.0) # 乘到 reward
+        self.eval_a = current_config.get("eval_hole_coeff", 50.0)        # a
+        self.eval_b = current_config.get("eval_bumpiness_coeff", 3.5)   # b
+        self.eval_c = current_config.get("eval_height_coeff", 30)      # c
+        self.eval_weight = current_config.get("eval_delta_weight", 1.3) # 乘到 reward
 
         self.prev_board_cost = 0.0   # 用來存上一步板面 cost
 
@@ -215,7 +212,7 @@ class TetrisEnv(gym.Env):
         # Note: This rewards the *action* of dropping, not the distance dropped,
         # as distance information is not directly available from the server.
         self.reward_drop_action_coeff = current_config.get("reward_drop_action_coeff", 0.1)
-
+        self.reward_move_action_coeff = current_config.get("reward_move_action_coeff", 2)
         # Penalty coefficients (as before, adjusted values)
         self.penalty_height_increase_coeff = current_config.get("penalty_height_increase_coeff", 7.5)
         self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 12.5)
@@ -244,8 +241,12 @@ class TetrisEnv(gym.Env):
         """
         # 將 (1,84,84) → (84,84) 並二值化
         img = (observation[0] < 128).astype(np.uint8)  # 1 = 塊，0 = 空
+        img2 = (observation[0] < 128).astype(np.uint8) * 255 
         grid_w = img.shape[1] // 10                    # 每一列寬度
-
+        save_dir = "obs_images"
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"obs_tmp.png")
+        cv2.imwrite(save_path, img2)
         # 估 10 列高度
         col_heights = []
         for i in range(10):
@@ -451,7 +452,10 @@ class TetrisEnv(gym.Env):
             drop_action_reward = self.reward_drop_action_coeff
             reward += drop_action_reward
         # --- END NEW ---
-
+        move_action_reward = 0.0
+        if action == 0 or action == 1:
+            move_action_reward = self.reward_move_action_coeff
+            reward += move_action_reward*5
         # --- !!! NEW: Smoother multi-line clear reward logic !!! ---
         line_clear_reward = 0.0
         if lines_cleared_this_step == 1:
@@ -790,7 +794,7 @@ if training_successful:
 
         model.save(final_model_path)
         write_log(f"✅ 最終模型已儲存: {final_model_path}")
-        display(FileLink(final_model_path))
+        
         if wandb_enabled and run: wandb.save(final_model_path) # Upload final model to wandb
 
     except Exception as e:
@@ -907,14 +911,14 @@ if training_successful:
                 try:
                     imageio.mimsave(gif_path, [np.array(frame).astype(np.uint8) for frame in all_frames if frame is not None], fps=15, loop=0)
                     write_log("     GIF 儲存成功.")
-                    display(FileLink(gif_path))
+                    
                     if wandb_enabled and run: wandb.log({"eval/replay": wandb.Video(gif_path, fps=15, format="gif")}) # Log GIF to Wandb
                 except Exception as e: write_log(f"     ❌ 儲存 GIF 時發生錯誤: {e}")
             else: write_log("     ⚠️ 未能儲存 GIF (沒有收集到幀或第一輪評估出錯).")
 
             # --- Save Evaluation Results CSV ---
             csv_filename = f'tetris_evaluation_scores_{run_id}.csv'
-            csv_path = os.path.join("/kaggle/working", csv_filename)
+            csv_path = os.path.join("./", csv_filename)
             try:
                 with open(csv_path, 'w') as fs:
                     fs.write('episode_id,removed_lines,played_steps,reward\n')
@@ -923,7 +927,7 @@ if training_successful:
                              fs.write(f'eval_{i},{total_lines[i]},{total_lifetimes[i]},{total_rewards[i]:.2f}\n')
                     fs.write(f'eval_avg,{mean_lines:.2f},{mean_lifetime:.2f},{mean_reward:.2f}\n')
                 write_log(f"✅ 評估分數 CSV 已儲存: {csv_path}")
-                display(FileLink(csv_path))
+                
                 if wandb_enabled and run: wandb.save(csv_path) # Upload CSV to wandb
             except Exception as e: write_log(f"     ❌ 儲存 CSV 時發生錯誤: {e}")
 

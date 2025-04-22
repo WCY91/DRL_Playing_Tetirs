@@ -1,0 +1,7 @@
+!pip install --upgrade pip
+!pip install \
+  stable‑baselines3==2.1.0 \
+  sb3‑contrib==2.1.0 \
+  gymnasium==0.29.0 \
+  shimmy>=1.2.1 \
+  ale‑py>=0.10.1
