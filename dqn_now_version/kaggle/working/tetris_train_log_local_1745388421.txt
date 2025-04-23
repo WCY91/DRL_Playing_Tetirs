@@ -4263,3 +4263,25 @@
 2025-04-23 15:29:28 - 🔥 Total Episode Reward: 32547.10
 2025-04-23 15:29:47 - 💔 Game Over! Final Lines: 0, Lifetime: 227. LC=0.00, HP=-7.50, OP=-25.00, SP=-0.50, GO=-800.00 -> Total=-831.50
 2025-04-23 15:29:47 - 🔥 Total Episode Reward: 29508.10
+2025-04-23 15:30:00 - 💔 Game Over! Final Lines: 0, Lifetime: 147. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:30:00 - 🔥 Total Episode Reward: 24898.60
+2025-04-23 15:30:12 - 💔 Game Over! Final Lines: 0, Lifetime: 140. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:30:12 - 🔥 Total Episode Reward: 13500.40
+2025-04-23 15:30:28 - 💔 Game Over! Final Lines: 0, Lifetime: 167. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:30:28 - 🔥 Total Episode Reward: 20289.60
+2025-04-23 15:30:46 - 💔 Game Over! Final Lines: 0, Lifetime: 167. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:30:46 - 🔥 Total Episode Reward: 18631.60
+2025-04-23 15:31:10 - 💔 Game Over! Final Lines: 0, Lifetime: 224. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:31:10 - 🔥 Total Episode Reward: 45849.30
+2025-04-23 15:31:24 - 💔 Game Over! Final Lines: 0, Lifetime: 151. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:31:24 - 🔥 Total Episode Reward: 18792.00
+2025-04-23 15:31:34 - 💔 Game Over! Final Lines: 0, Lifetime: 135. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:31:34 - 🔥 Total Episode Reward: 9213.40
+2025-04-23 15:31:46 - 💔 Game Over! Final Lines: 0, Lifetime: 171. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-800.50
+2025-04-23 15:31:46 - 🔥 Total Episode Reward: 22767.00
+2025-04-23 15:31:56 - 💔 Game Over! Final Lines: 0, Lifetime: 146. LC=0.00, HP=-15.00, OP=-12.50, SP=-0.50, GO=-800.00 -> Total=-826.50
+2025-04-23 15:31:56 - 🔥 Total Episode Reward: 22022.00
+2025-04-23 15:32:07 - 💔 Game Over! Final Lines: 0, Lifetime: 172. LC=0.00, HP=-7.50, OP=-25.00, SP=-0.50, GO=-800.00 -> Total=-831.50
+2025-04-23 15:32:07 - 🔥 Total Episode Reward: 18915.10
+2025-04-23 15:32:19 - 💔 Game Over! Final Lines: 0, Lifetime: 185. LC=0.00, HP=-0.00, OP=-0.00, SP=-0.50, GO=-800.00 -> Total=-799.00
+2025-04-23 15:32:19 - 🔥 Total Episode Reward: 41928.40
