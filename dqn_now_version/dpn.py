@@ -14,7 +14,6 @@ from gymnasium import spaces
 from stable_baselines3 import DQN
 # from stable_baselines3.common.env_util import make_vec_env # Not used
 from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack, DummyVecEnv
-from IPython.display import FileLink, display # Image not used directly
 # from stable_baselines3.common.callbacks import BaseCallback # Replaced by WandbCallback
 import torch
 import time
@@ -23,7 +22,7 @@ from stable_baselines3 import PPO
 # --- Wandb Setup ---
 import os
 import wandb
-from kaggle_secrets import UserSecretsClient
+
 # Import WandbCallback for SB3 integration
 from wandb.integration.sb3 import WandbCallback
 
@@ -31,13 +30,11 @@ from wandb.integration.sb3 import WandbCallback
 # Set your student ID here for filenames
 STUDENT_ID = "113598065"
 # Set total training steps
-TOTAL_TIMESTEPS = 1000000 # Adjust as needed (e.g., 1M, 2M, 5M)
+TOTAL_TIMESTEPS = 1500000 # Adjust as needed (e.g., 1M, 2M, 5M)
 
 
 # --- Wandb Login and Initialization ---
 try:
-    user_secrets = UserSecretsClient()
-    WANDB_API_KEY = user_secrets.get_secret("WANDB_API_KEY")
     os.environ["WANDB_API_KEY"] = WANDB_API_KEY
     wandb.login()
     wandb_enabled = True
@@ -52,22 +49,23 @@ config = { # Log hyperparameters
     "policy_type": "CnnPolicy",
     "total_timesteps": TOTAL_TIMESTEPS,
     "env_id": "TetrisEnv-v1",
-    "gamma": 0.99,
-    "learning_rate": 2e-4,
+    "gamma": 0.98,
+    "learning_rate": 5e-4,
     "buffer_size": 300000,
-    "learning_starts": 1000,
-    "target_update_interval": 1000,
-    "exploration_fraction": 0.5, # <<< INCREASED exploration duration
+    "learning_starts": 3000,
+    "target_update_interval": 5000,
+    "exploration_fraction": 0.08, # <<< INCREASED exploration duration
+    "exploration_initial_eps":  0.5,
     "exploration_final_eps": 0.03, # Kept final exploration rate
     "batch_size": 32,
     "n_stack": 4,
     "student_id": STUDENT_ID,
     # --- NEW: Add reward coeffs to config for tracking ---
-    "reward_line_clear_coeff": 100.0, # Example value, match below
+    "reward_line_clear_coeff": 400.0, # Example value, match below
     "penalty_height_increase_coeff": 7.5, # Example value, match below
     "penalty_hole_increase_coeff": 12.5, # Example value, match below
     "penalty_step_coeff": 0.5, # Example value, match below
-    "penalty_game_over_coeff": 100.0 # Example value, match below
+    "penalty_game_over_coeff": 800.0 # Example value, match below
 }
 
 if wandb_enabled:
@@ -84,8 +82,7 @@ else:
     run = None # Set run to None if wandb is disabled
     run_id = f"local_{int(time.time())}" # Create a local ID for paths
 
-
-log_path = f"/kaggle/working/tetris_train_log_{run_id}.txt"
+log_path = f"./kaggle/working/tetris_train_log_{run_id}.txt"
 
 def write_log(message):
     """Appends a message to the log file and prints it."""
@@ -94,6 +91,7 @@ def write_log(message):
     try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(log_message + "\n")
+            print('writing')
     except Exception as e:
         print(f"Error writing to log file {log_path}: {e}")
     print(log_message)
@@ -167,6 +165,10 @@ class TetrisEnv(gym.Env):
 
     def __init__(self, host_ip="127.0.0.1", host_port=10612, render_mode=None):
         super().__init__()
+        current_config = run.config if run else config # Use global config if no run
+        self.episode_total_reward = 0.0
+        self.survival_reward_coeff = current_config.get("survival_reward_coeff", 2.1)
+        self.drop_reward_coeff     = current_config.get("drop_reward_coeff",     1.5)
         self.render_mode = render_mode
         self.action_space = spaces.Discrete(self.N_DISCRETE_ACTIONS)
         self.observation_space = spaces.Box(
@@ -174,6 +176,9 @@ class TetrisEnv(gym.Env):
             shape=(1, self.RESIZED_DIM, self.RESIZED_DIM), # (Channels, Height, Width)
             dtype=np.uint8
         )
+        self.eval_a = current_config.get("eval_hole_coeff", 35.0)
+        self.eval_b = current_config.get("eval_bumpiness_coeff", 33.5)
+        self.eval_c = current_config.get("eval_height_coeff", 36.0)
         self.server_ip = host_ip
         self.server_port = host_port
         self.client_sock = None
@@ -188,7 +193,7 @@ class TetrisEnv(gym.Env):
 
         # --- !!! REWARD SHAPING COEFFICIENTS MODIFIED HERE !!! ---
         # Retrieve from Wandb config if available, otherwise use defaults
-        current_config = run.config if run else config # Use global config if no run
+        
         self.reward_line_clear_coeff = current_config.get("reward_line_clear_coeff", 500.0)       # INCREASED
         self.penalty_height_increase_coeff = current_config.get("penalty_height_increase_coeff", 7.5) # DECREASED
         self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 12.5)   # DECREASED
@@ -324,7 +329,60 @@ class TetrisEnv(gym.Env):
             write_log(f"❌ Unexpected error getting server response: {e}. Ending episode.")
             # Return last known state and signal termination
             return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+    
+    def _calculate_balance_reward(self, col_heights, holes):
+        """
+        計算方塊堆積的平衡程度和空洞數量。
+        標準差越小（平衡）且空洞越少，獎勵越高。
+        """
+        balance_std = np.std(col_heights)
+        
+        # 平衡獎勵（標準差越低獎勵越高）
+        balance_reward = max(0, 400 - balance_std * 30)
 
+        # 空洞懲罰（空洞越多懲罰越重）
+        hole_penalty = holes * 20  # 每個空洞扣50點獎勵，可自行調整
+        bumpiness = np.sum(np.abs(np.diff(col_heights)))
+        # 綜合獎勵：平衡獎勵減去空洞懲罰（確保非負）
+        total_balance_reward = max(0, balance_reward - hole_penalty - 32*bumpiness)
+
+        return total_balance_reward
+
+    def _compute_board_cost(self, observation, holes,max_h):
+        """
+        由灰階 observation 推估 10 列高度，計算
+        cost = a*holes + b*bumpiness + c*aggregateHeight
+        ※ 以『越小越好』的 cost 形式回傳
+        """
+        # 將 (1,84,84) → (84,84) 並二值化
+        img = (observation[0] < 128).astype(np.uint8)  # 1 = 塊，0 = 空
+        img2 = (observation[0] < 128).astype(np.uint8) * 255 
+        grid_w = img.shape[1] // 10                    # 每一列寬度
+        save_dir = "obs_images"
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"obs_tmp.png")
+        cv2.imwrite(save_path, img2)
+        # 估 10 列高度
+        col_heights = []
+        for i in range(10):
+            start = i * grid_w
+            end = (i + 1) * grid_w if i < 9 else 84  # 最後一欄補到 84，避免落掉最後一列像素
+            col = img[:, start:end]
+            rows = np.where(col.any(axis=1))[0]
+            h = 0 if len(rows) == 0 else (img.shape[0] - rows[0])
+            col_heights.append(h)
+
+        bumpiness = sum(abs(np.diff(col_heights)))
+
+        max_h = max(col_heights)
+        min_h = min(col_heights)
+        height_range = max_h - min_h
+        cost = (self.eval_a * holes +
+                self.eval_b * bumpiness * 1.5 +
+                self.eval_c * max_h+
+                10 * height_range)
+        cost = cost * -0.2
+        return cost , max_h,col_heights
 
     def step(self, action):
         # --- Send Action ---
@@ -391,7 +449,7 @@ class TetrisEnv(gym.Env):
         elif lines_cleared_this_step == 3:
             line_clear_reward = 9 * self.reward_line_clear_coeff
         elif lines_cleared_this_step >= 4:
-            line_clear_reward = 25 * self.reward_line_clear_coeff # Big bonus for Tetris
+            line_clear_reward = 15 * self.reward_line_clear_coeff # Big bonus for Tetris
         reward += line_clear_reward
         # --- END NEW ---
 
@@ -410,14 +468,34 @@ class TetrisEnv(gym.Env):
         step_penalty = self.penalty_step_coeff # Will be 0 if set above
         reward -= step_penalty # Apply step penalty (even if 0)
 
+        if action == 4:           # 硬降
+            reward += self.drop_reward_coeff
+        if not terminated:        # 存活
+            reward += self.survival_reward_coeff
+
         game_over_penalty = 0.0
         if terminated:
             game_over_penalty = self.penalty_game_over_coeff
-            reward -= game_over_penalty
+            lifetime_ratio = self.lifetime / 80
+            early_penalty = self.penalty_game_over_coeff * max(0.0, 1.0 - lifetime_ratio) ** 2 * 3
+            _,_, col_heights = self._compute_board_cost(observation, new_holes, new_height)
+            balance_reward = self._calculate_balance_reward(col_heights, new_holes)
+            reward += balance_reward 
+            reward -= (early_penalty + game_over_penalty)
             # Log only once per game over for clarity, ADDED reward breakdown
-            write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}. Step Reward Breakdown: LC={line_clear_reward:.2f}, HP={-height_penalty:.2f}, OP={-hole_penalty:.2f}, SP={-step_penalty:.2f}, GO={-game_over_penalty:.2f} -> Total={reward:.2f}")
+            self.episode_total_reward += reward
+            # Log only once per game over for clarity, ADDED reward breakdown
+            write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}. "
+                      f"LC={line_clear_reward:.2f}, "
+                      f"HP={-height_penalty:.2f}, OP={-hole_penalty:.2f}, SP={-step_penalty:.2f}, "
+                      f"GO={-game_over_penalty:.2f} -> Total={reward:.2f}")
+            write_log(f"🔥 Total Episode Reward: {self.episode_total_reward:.2f}")
 
+        _,_, col_heights = self._compute_board_cost(observation, new_holes, new_height)
+        balance_reward = self._calculate_balance_reward(col_heights, new_holes)
+        reward += balance_reward 
         # --- Update Internal State ---
+        self.episode_total_reward += reward
         self.lines_removed = new_lines_removed
         self.current_height = new_height
         self.current_holes = new_holes
@@ -471,6 +549,7 @@ class TetrisEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.episode_total_reward = 0.0
         # Reset the Wandb error reported flag for the new episode
         self._wandb_log_error_reported = False
 
@@ -694,7 +773,6 @@ if training_successful:
 
         model.save(final_model_path)
         write_log(f"✅ 最終模型已儲存: {final_model_path}")
-        display(FileLink(final_model_path))
         if wandb_enabled and run: wandb.save(final_model_path) # Upload final model to wandb
 
     except Exception as e:
@@ -808,7 +886,6 @@ if training_successful:
                 try:
                     imageio.mimsave(gif_path, [np.array(frame).astype(np.uint8) for frame in all_frames if frame is not None], fps=15, loop=0)
                     write_log("   GIF 儲存成功.")
-                    display(FileLink(gif_path))
                     if wandb_enabled and run: wandb.log({"eval/replay": wandb.Video(gif_path, fps=15, format="gif")}) # Log GIF to Wandb
                 except Exception as e: write_log(f"   ❌ 儲存 GIF 時發生錯誤: {e}")
             else: write_log("   ⚠️ 未能儲存 GIF (沒有收集到幀或第一輪評估出錯).")
@@ -824,7 +901,6 @@ if training_successful:
                              fs.write(f'eval_{i},{total_lines[i]},{total_lifetimes[i]},{total_rewards[i]:.2f}\n')
                     fs.write(f'eval_avg,{mean_lines:.2f},{mean_lifetime:.2f},{mean_reward:.2f}\n')
                 write_log(f"✅ 評估分數 CSV 已儲存: {csv_path}")
-                display(FileLink(csv_path))
                 if wandb_enabled and run: wandb.save(csv_path) # Upload CSV to wandb
             except Exception as e: write_log(f"   ❌ 儲存 CSV 時發生錯誤: {e}")
 
