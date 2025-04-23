@@ -31,7 +31,7 @@ from wandb.integration.sb3 import WandbCallback
 # Set your student ID here for filenames
 STUDENT_ID = "113598065"
 # Set total training steps
-TOTAL_TIMESTEPS = 4700000 # Adjust as needed (e.g., 1M, 2M, 5M)
+TOTAL_TIMESTEPS = 5000000 # Adjust as needed (e.g., 1M, 2M, 5M)
 
 
 # --- Wandb Login and Initialization ---
@@ -51,27 +51,28 @@ config = { # Log hyperparameters
     "policy_type": "CnnPolicy",
     "total_timesteps": TOTAL_TIMESTEPS,
     "env_id": "TetrisEnv-v1-ShapedReward", # Updated env id for clarity
-    "gamma": 0.95,
+    "gamma": 0.98,
     "learning_rate": 5e-4,
     "buffer_size": 200000,
     "learning_starts": 5000,
-    "target_update_interval": 1500,
-    "exploration_fraction": 0.07, # <<< INCREASED exploration duration
+    "target_update_interval": 8000,
+    "exploration_fraction": 0.08, # <<< INCREASED exploration duration
+    "exploration_initial_eps":  0.5,
     "exploration_final_eps": 0.08, # Kept final exploration rate
     "batch_size": 64,
     "n_stack": 4,
     "student_id": STUDENT_ID,
     # --- Reward Coeffs: Updated based on request ---
     # REMOVED: "reward_line_clear_coeff": 650.0,
-    "reward_line_clear_1_coeff": 230.0,    # NEW: Reward for clearing 1 line (adjust as needed)
-    "reward_line_clear_2_coeff": 440.0,    # NEW: Reward for clearing 2 lines (adjust as needed)
-    "reward_line_clear_3_coeff": 850.0,    # NEW: Reward for clearing 3 lines (adjust as needed)
-    "reward_line_clear_4_coeff": 2280.0,   # NEW: Reward for clearing 4+ lines (Tetris) (adjust as needed)
+    "reward_line_clear_1_coeff": 1230.0,    # NEW: Reward for clearing 1 line (adjust as needed)
+    "reward_line_clear_2_coeff": 1840.0,    # NEW: Reward for clearing 2 lines (adjust as needed)
+    "reward_line_clear_3_coeff": 2850.0,    # NEW: Reward for clearing 3 lines (adjust as needed)
+    "reward_line_clear_4_coeff": 4580.0,   # NEW: Reward for clearing 4+ lines (Tetris) (adjust as needed)
     "reward_drop_action_coeff": 0.5,     # NEW: Small reward for using the 'drop' action (adjust as needed)
-    "penalty_height_increase_coeff": 24.5,
-    "penalty_hole_increase_coeff": 22.5,
-    "penalty_step_coeff": 3.5,          # Set to zero as per previous config
-    "penalty_game_over_coeff": 2500.0
+    "penalty_height_increase_coeff": 12.5,
+    "penalty_hole_increase_coeff": 14.5,
+    "penalty_step_coeff": 1.5,          # Set to zero as per previous config
+    "penalty_game_over_coeff": 8500.0
 }
 
 if wandb_enabled:
@@ -180,7 +181,7 @@ class TetrisEnv(gym.Env):
             shape=(1, self.RESIZED_DIM, self.RESIZED_DIM), # (Channels, Height, Width)
             dtype=np.uint8
         )
-        self.survival_reward = 65
+        self.survival_reward = 120
         self.server_ip = host_ip
         self.server_port = host_port
         self.client_sock = None
@@ -196,7 +197,7 @@ class TetrisEnv(gym.Env):
         self.eval_a = current_config.get("eval_hole_coeff", 35.0)        # a
         self.eval_b = current_config.get("eval_bumpiness_coeff", 23.5)   # b
         self.eval_c = current_config.get("eval_height_coeff", 36.0)      # c
-        self.eval_weight = current_config.get("eval_delta_weight", 1.3) # 乘到 reward
+        self.eval_weight = current_config.get("eval_delta_weight", 3.0) # 乘到 reward
 
         self.prev_board_cost = 0.0   # 用來存上一步板面 cost
 
@@ -214,7 +215,7 @@ class TetrisEnv(gym.Env):
         # Note: This rewards the *action* of dropping, not the distance dropped,
         # as distance information is not directly available from the server.
         self.reward_drop_action_coeff = current_config.get("reward_drop_action_coeff", 0.1)
-        self.reward_move_action_coeff = current_config.get("reward_move_action_coeff", 10)
+        self.reward_move_action_coeff = current_config.get("reward_move_action_coeff", 18)
         # Penalty coefficients (as before, adjusted values)
         self.penalty_height_increase_coeff = current_config.get("penalty_height_increase_coeff", 7.5)
         self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 12.5)
@@ -266,9 +267,9 @@ class TetrisEnv(gym.Env):
         min_h = min(col_heights)
         height_range = max_h - min_h
         cost = (self.eval_a * holes +
-                self.eval_b * bumpiness +
+                self.eval_b * bumpiness * 1.5 +
                 self.eval_c * max_h+
-                50 * height_range)
+                10 * height_range)
         return cost , max_h
 
     def _initialize_pygame(self):
@@ -463,7 +464,7 @@ class TetrisEnv(gym.Env):
         move_action_reward = 0.0
         if action == 0 or action == 1:
             move_action_reward = self.reward_move_action_coeff
-            reward += move_action_reward*1.8
+            reward += move_action_reward*3.8
         # --- !!! NEW: Smoother multi-line clear reward logic !!! ---
         line_clear_reward = 0.0
         if lines_cleared_this_step == 1:
@@ -494,18 +495,18 @@ class TetrisEnv(gym.Env):
         # --- END NEW ---
         self.max_h_trend.append(max_h)
         if len(self.max_h_trend) == 5 and all(h > 55 for h in self.max_h_trend):
-            penalty = min(100 * len([h for h in self.max_h_trend if h > 55]), 180)
+            penalty = min(100 * len([h for h in self.max_h_trend if h > 55]), 130)
             reward -= penalty
         if len(self.max_h_trend) == 5 and self.max_h_trend[-1] < self.max_h_trend[0]:
-            reward += 78  # 鼓勵降低高度
+            reward += 128  # 鼓勵降低高度
         if max_h > 70:
-            reward -= (max_h - 70) * 41
+            reward -= (max_h - 70) * 20
         # --- Penalties (Height, Holes, Step, Game Over) ---
         height_increase = new_height - self.current_height
         height_penalty = 0.0
         if height_increase > 0:
             height_penalty = height_increase * self.penalty_height_increase_coeff
-            reward -= 1.2*height_penalty
+            reward -= 0.8*height_penalty
 
         hole_increase = new_holes - self.current_holes
         hole_penalty = 0.0
@@ -516,17 +517,28 @@ class TetrisEnv(gym.Env):
         step_penalty = self.penalty_step_coeff # Will be 0 if set above
         reward -= step_penalty # Apply step penalty (even if 0)
         game_over_penalty = 0.0
-        
+        if self.lifetime < 80:
+            self.survival_reward = 520
+        else:
+            self.survival_reward = 400
+        reward += self.survival_reward
         if terminated:
             game_over_penalty = self.penalty_game_over_coeff
-            reward -= game_over_penalty
+
+            # ⚠️ 替代原本 hard-coded 的懲罰
+            lifetime_ratio = self.lifetime / 80
+            print(lifetime_ratio)
+            early_penalty = self.penalty_game_over_coeff * max(0.0, 1.0 - lifetime_ratio) ** 2 * 11   # 平滑曲線，非線性懲罰
+
+            reward -= (early_penalty + game_over_penalty)
+            self.episode_total_reward += reward
             # Log only once per game over for clarity, ADDED reward breakdown
             write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}. "
                       f"Step Reward Breakdown: Drop={drop_action_reward:.2f}, LC={line_clear_reward:.2f}, "
                       f"HP={-height_penalty:.2f}, OP={-hole_penalty:.2f}, SP={-step_penalty:.2f}, "
                       f"GO={-game_over_penalty:.2f} -> Total={reward:.2f}")
             write_log(f"🔥 Total Episode Reward: {self.episode_total_reward:.2f}")
-        reward += self.survival_reward
+
         self.episode_total_reward += reward
         
         # --- Update Internal State ---
