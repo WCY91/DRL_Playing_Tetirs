@@ -30,7 +30,7 @@ from wandb.integration.sb3 import WandbCallback
 # Set your student ID here for filenames
 STUDENT_ID = "113598065"
 # Set total training steps
-TOTAL_TIMESTEPS = 1500000 # Adjust as needed (e.g., 1M, 2M, 5M)
+TOTAL_TIMESTEPS = 3500000 # Adjust as needed (e.g., 1M, 2M, 5M)
 
 
 # --- Wandb Login and Initialization ---
@@ -49,23 +49,24 @@ config = { # Log hyperparameters
     "policy_type": "CnnPolicy",
     "total_timesteps": TOTAL_TIMESTEPS,
     "env_id": "TetrisEnv-v1",
-    "gamma": 0.98,
-    "learning_rate": 5e-4,
-    "buffer_size": 300000,
-    "learning_starts": 3000,
+    "gamma": 0.995,
+    "learning_rate": 1e-4,
+    "buffer_size": 200000,
+    "learning_starts": 10000,
+    "train_freq":4,
     "target_update_interval": 5000,
-    "exploration_fraction": 0.08, # <<< INCREASED exploration duration
-    "exploration_initial_eps":  0.5,
-    "exploration_final_eps": 0.03, # Kept final exploration rate
-    "batch_size": 32,
+    "exploration_fraction": 0.28, # <<< INCREASED exploration duration
+    "exploration_initial_eps":  0.9,
+    "exploration_final_eps": 0.15,#Kept final exploration rate
+    "batch_size": 64,
     "n_stack": 4,
     "student_id": STUDENT_ID,
     # --- NEW: Add reward coeffs to config for tracking ---
-    "reward_line_clear_coeff": 400.0, # Example value, match below
-    "penalty_height_increase_coeff": 7.5, # Example value, match below
-    "penalty_hole_increase_coeff": 12.5, # Example value, match below
-    "penalty_step_coeff": 0.5, # Example value, match below
-    "penalty_game_over_coeff": 800.0 # Example value, match below
+    "reward_line_clear_coeff": 110.0, # Example value, match below
+    "penalty_height_increase_coeff": 3, # Example value, match below
+    "penalty_hole_increase_coeff": 2.5, # Example value, match below
+    "penalty_step_coeff": 0.05, # Example value, match below
+    "penalty_game_over_coeff": 280.0 # Example value, match below
 }
 
 if wandb_enabled:
@@ -167,8 +168,9 @@ class TetrisEnv(gym.Env):
         super().__init__()
         current_config = run.config if run else config # Use global config if no run
         self.episode_total_reward = 0.0
-        self.survival_reward_coeff = current_config.get("survival_reward_coeff", 2.1)
-        self.drop_reward_coeff     = current_config.get("drop_reward_coeff",     1.5)
+        self.total_lines_this_episode = 0
+        self.survival_reward_coeff = current_config.get("survival_reward_coeff", 8.1)
+        self.drop_reward_coeff     = current_config.get("drop_reward_coeff",     10)
         self.render_mode = render_mode
         self.action_space = spaces.Discrete(self.N_DISCRETE_ACTIONS)
         self.observation_space = spaces.Box(
@@ -194,11 +196,11 @@ class TetrisEnv(gym.Env):
         # --- !!! REWARD SHAPING COEFFICIENTS MODIFIED HERE !!! ---
         # Retrieve from Wandb config if available, otherwise use defaults
         
-        self.reward_line_clear_coeff = current_config.get("reward_line_clear_coeff", 500.0)       # INCREASED
-        self.penalty_height_increase_coeff = current_config.get("penalty_height_increase_coeff", 7.5) # DECREASED
-        self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 12.5)   # DECREASED
+        self.reward_line_clear_coeff = current_config.get("reward_line_clear_coeff", 80.0)       # INCREASED
+        self.penalty_height_increase_coeff = current_config.get("penalty_height_increase_coeff", 1.75) # DECREASED
+        self.penalty_hole_increase_coeff = current_config.get("penalty_hole_increase_coeff", 1.25)   # DECREASED
         self.penalty_step_coeff = current_config.get("penalty_step_coeff", 0.0)                   # SET TO ZERO
-        self.penalty_game_over_coeff = current_config.get("penalty_game_over_coeff", 500.0)     # Kept same for now
+        self.penalty_game_over_coeff = current_config.get("penalty_game_over_coeff", 80.0)     # Kept same for now
         write_log(f"TetrisEnv initialized with Reward Coeffs: Line={self.reward_line_clear_coeff}, H={self.penalty_height_increase_coeff}, O={self.penalty_hole_increase_coeff}, Step={self.penalty_step_coeff}, GO={self.penalty_game_over_coeff}")
 
 
@@ -313,7 +315,12 @@ class TetrisEnv(gym.Env):
 
             resized = cv2.resize(np_image, (self.RESIZED_DIM, self.RESIZED_DIM), interpolation=cv2.INTER_AREA)
             gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-            observation = np.expand_dims(gray, axis=0).astype(np.uint8) # Combine steps
+            stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+            observation = np.expand_dims(stretched, axis=0).astype(np.uint8)
+            save_dir = "gray_images"
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"gray_tmp.png")
+            cv2.imwrite(os.path.join(save_dir, "gray_tmp.png"), stretched)
 
             # Store frames for rendering/observation
             self.last_raw_render_frame = resized.copy() # Store BGR for render
@@ -338,13 +345,13 @@ class TetrisEnv(gym.Env):
         balance_std = np.std(col_heights)
         
         # 平衡獎勵（標準差越低獎勵越高）
-        balance_reward = max(0, 400 - balance_std * 30)
+        balance_reward = max(10, 27 - balance_std * 3)
 
         # 空洞懲罰（空洞越多懲罰越重）
-        hole_penalty = holes * 20  # 每個空洞扣50點獎勵，可自行調整
+        hole_penalty = holes * 2  # 每個空洞扣50點獎勵，可自行調整
         bumpiness = np.sum(np.abs(np.diff(col_heights)))
         # 綜合獎勵：平衡獎勵減去空洞懲罰（確保非負）
-        total_balance_reward = max(0, balance_reward - hole_penalty - 32*bumpiness)
+        total_balance_reward = max(0, balance_reward - hole_penalty - 3*bumpiness)
 
         return total_balance_reward
 
@@ -364,6 +371,7 @@ class TetrisEnv(gym.Env):
         cv2.imwrite(save_path, img2)
         # 估 10 列高度
         col_heights = []
+        bottom_empty_count = 0
         for i in range(10):
             start = i * grid_w
             end = (i + 1) * grid_w if i < 9 else 84  # 最後一欄補到 84，避免落掉最後一列像素
@@ -371,6 +379,9 @@ class TetrisEnv(gym.Env):
             rows = np.where(col.any(axis=1))[0]
             h = 0 if len(rows) == 0 else (img.shape[0] - rows[0])
             col_heights.append(h)
+            bottom_row = col[-1, :]  # 最底一列
+            if not bottom_row.any():  # 如果整個底部是空的
+                bottom_empty_count += 1
 
         bumpiness = sum(abs(np.diff(col_heights)))
 
@@ -381,22 +392,17 @@ class TetrisEnv(gym.Env):
                 self.eval_b * bumpiness * 1.5 +
                 self.eval_c * max_h+
                 10 * height_range)
-        cost = cost * -0.2
-        return cost , max_h,col_heights
-
+        cost = cost * -0.02
+        return cost , max_h,col_heights , bottom_empty_count
+    
     def step(self, action):
-        # --- Send Action ---
+        # 1. 送指令
         command_map = {
             0: b"move -1\n", 1: b"move 1\n",
             2: b"rotate 0\n", 3: b"rotate 1\n",
             4: b"drop\n"
         }
         command = command_map.get(action)
-        if command is None:
-            write_log(f"⚠️ Invalid action received: {action}. Sending 'drop'.")
-            command = b"drop\n"
-        # write_log(f"{self._log_prefix} Step {self.lifetime + 1}: Chosen Action={act_val}, Command={command.strip()}")
-        # write_log(f"Step {self.lifetime + 1}: Chosen Action={action}, Command={command.strip()}")
         try:
             self._send_command(command)
         except (ConnectionAbortedError, ConnectionError) as e:
@@ -406,149 +412,217 @@ class TetrisEnv(gym.Env):
             reward = self.penalty_game_over_coeff * -1 # Apply game over penalty directly
             info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime, 'final_status': 'send_error'}
             info['terminal_observation'] = observation # Add terminal observation
-
-            # --- Log detailed rewards on send failure termination ---
-            if wandb_enabled and run:
-                try:
-                    log_data = {
-                         "reward/step_total": reward,
-                         "reward/step_line_clear": 0.0,
-                         "reward/step_height_penalty": 0.0,
-                         "reward/step_hole_penalty": 0.0,
-                         "reward/step_survival_penalty": 0.0,
-                         "reward/step_game_over_penalty": -self.penalty_game_over_coeff, # Log the penalty
-                         "env/lines_cleared_this_step": 0,
-                         "env/height_increase": 0,
-                         "env/hole_increase": 0,
-                         "env/current_height": self.current_height,
-                         "env/current_holes": self.current_holes,
-                         "env/current_lifetime": self.lifetime
-                    }
-                    wandb.log(log_data) # Log immediately
-                except Exception as log_e:
-                     if not self._wandb_log_error_reported:
-                         print(f"Wandb logging error in step (send fail): {log_e}")
-                         self._wandb_log_error_reported = True
-            # --- End logging ---
-
             return observation, reward, terminated, False, info # Return immediately
-
-        # --- Get State Update ---
-        terminated, new_lines_removed, new_height, new_holes, observation = self.get_tetris_server_response()
-
-        # --- Calculate Reward ---
+        
+        terminated, new_lines, new_h, new_holes, obs = self.get_tetris_server_response()
+        lines_cleared = new_lines - self.lines_removed
+        self.total_lines_this_episode += lines_cleared
+        # 2. ── 簡化版 Reward ──────────────────────────────
         reward = 0.0
-        lines_cleared_this_step = new_lines_removed - self.lines_removed
 
-        # --- !!! NEW: Multi-line clear reward logic !!! ---
-        line_clear_reward = 0.0
-        if lines_cleared_this_step == 1:
-            line_clear_reward = 1 * self.reward_line_clear_coeff
-        elif lines_cleared_this_step == 2:
-            line_clear_reward = 4 * self.reward_line_clear_coeff # Quadratic
-        elif lines_cleared_this_step == 3:
-            line_clear_reward = 9 * self.reward_line_clear_coeff
-        elif lines_cleared_this_step >= 4:
-            line_clear_reward = 15 * self.reward_line_clear_coeff # Big bonus for Tetris
-        reward += line_clear_reward
-        # --- END NEW ---
+        # (a) 清線：平方給獎，鼓勵一口氣消多行
+        lines_cleared = new_lines - self.lines_removed
+        reward += 10 * (lines_cleared ** 2)
 
-        height_increase = new_height - self.current_height
-        height_penalty = 0.0
-        if height_increase > 0:
-            height_penalty = height_increase * self.penalty_height_increase_coeff
-            reward -= height_penalty
+        # (b) 空洞 + 堆高：一次性度量 → 懲罰
+        reward -= 0.1 * (new_holes + new_h)
+        if action == 4:
+            reward += 1.5
+        # (c) 生存：只要還活著就給小獎
+        if not terminated:
+            reward += 0.1
+        else:
+            # 結束時再扣一點固定罰
+            reward -= 80
 
-        hole_increase = new_holes - self.current_holes
-        hole_penalty = 0.0
-        if hole_increase > 0:
-            hole_penalty = hole_increase * self.penalty_hole_increase_coeff
-            reward -= hole_penalty
-
-        step_penalty = self.penalty_step_coeff # Will be 0 if set above
-        reward -= step_penalty # Apply step penalty (even if 0)
-
-        if action == 4:           # 硬降
-            reward += self.drop_reward_coeff
-        if not terminated:        # 存活
-            reward += self.survival_reward_coeff
-
-        game_over_penalty = 0.0
+        if new_holes < self.current_holes:
+            reward += (self.current_holes - new_holes) * 1.0
+        # ───────────────────────────────────────────────
+        self.lines_removed = new_lines
         if terminated:
-            game_over_penalty = self.penalty_game_over_coeff
-            lifetime_ratio = self.lifetime / 80
-            early_penalty = self.penalty_game_over_coeff * max(0.0, 1.0 - lifetime_ratio) ** 2 * 3
-            _,_, col_heights = self._compute_board_cost(observation, new_holes, new_height)
-            balance_reward = self._calculate_balance_reward(col_heights, new_holes)
-            reward += balance_reward 
-            reward -= (early_penalty + game_over_penalty)
-            # Log only once per game over for clarity, ADDED reward breakdown
-            self.episode_total_reward += reward
-            # Log only once per game over for clarity, ADDED reward breakdown
-            write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}. "
-                      f"LC={line_clear_reward:.2f}, "
-                      f"HP={-height_penalty:.2f}, OP={-hole_penalty:.2f}, SP={-step_penalty:.2f}, "
-                      f"GO={-game_over_penalty:.2f} -> Total={reward:.2f}")
             write_log(f"🔥 Total Episode Reward: {self.episode_total_reward:.2f}")
+            write_log(f"💔 Game Over!  本局共清 {self.total_lines_this_episode} 行，"
+                  f"總步數 {self.lifetime}，總獎勵 {self.episode_total_reward:.2f}")
 
-        _,_, col_heights = self._compute_board_cost(observation, new_holes, new_height)
-        balance_reward = self._calculate_balance_reward(col_heights, new_holes)
-        reward += balance_reward 
-        # --- Update Internal State ---
+        # 3. 更新狀態
+        self.lines_removed = new_lines
+        self.current_height = new_h
+        self.current_holes  = new_holes
+        self.lifetime      += 1
         self.episode_total_reward += reward
-        self.lines_removed = new_lines_removed
-        self.current_height = new_height
-        self.current_holes = new_holes
-        self.lifetime += 1
 
-        # --- Prepare Return Values ---
-        info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime}
-        truncated = False # DQN typically doesn't use truncation like PPO
+        info = {'removed_lines': new_lines, 'lifetime': self.lifetime}
+        return obs, reward, terminated, False, info
 
-        if terminated:
-            info['terminal_observation'] = observation.copy()
-            # Log final stats here if needed, or use SB3 logger/callback
-            # Example: print(f"Episode End: Lines={self.lines_removed}, Lifetime={self.lifetime}, Reward={reward}")
+    # def step(self, action):
+    #     # --- Send Action ---
+    #     command_map = {
+    #         0: b"move -1\n", 1: b"move 1\n",
+    #         2: b"rotate 0\n", 3: b"rotate 1\n",
+    #         4: b"drop\n"
+    #     }
+    #     command = command_map.get(action)
+    #     if command is None:
+    #         write_log(f"⚠️ Invalid action received: {action}. Sending 'drop'.")
+    #         command = b"drop\n"
+    #     # write_log(f"{self._log_prefix} Step {self.lifetime + 1}: Chosen Action={act_val}, Command={command.strip()}")
+    #     # write_log(f"Step {self.lifetime + 1}: Chosen Action={action}, Command={command.strip()}")
+    #     try:
+    #         self._send_command(command)
+    #     except (ConnectionAbortedError, ConnectionError) as e:
+    #         write_log(f"❌ Ending episode due to send failure in step: {e}")
+    #         terminated = True
+    #         observation = self.last_observation.copy()
+    #         reward = self.penalty_game_over_coeff * -1 # Apply game over penalty directly
+    #         info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime, 'final_status': 'send_error'}
+    #         info['terminal_observation'] = observation # Add terminal observation
+
+    #         # --- Log detailed rewards on send failure termination ---
+    #         if wandb_enabled and run:
+    #             try:
+    #                 log_data = {
+    #                      "reward/step_total": reward,
+    #                      "reward/step_line_clear": 0.0,
+    #                      "reward/step_height_penalty": 0.0,
+    #                      "reward/step_hole_penalty": 0.0,
+    #                      "reward/step_survival_penalty": 0.0,
+    #                      "reward/step_game_over_penalty": -self.penalty_game_over_coeff, # Log the penalty
+    #                      "env/lines_cleared_this_step": 0,
+    #                      "env/height_increase": 0,
+    #                      "env/hole_increase": 0,
+    #                      "env/current_height": self.current_height,
+    #                      "env/current_holes": self.current_holes,
+    #                      "env/current_lifetime": self.lifetime
+    #                 }
+    #                 wandb.log(log_data) # Log immediately
+    #             except Exception as log_e:
+    #                  if not self._wandb_log_error_reported:
+    #                      print(f"Wandb logging error in step (send fail): {log_e}")
+    #                      self._wandb_log_error_reported = True
+    #         # --- End logging ---
+
+    #         return observation, reward, terminated, False, info # Return immediately
+
+    #     # --- Get State Update ---
+    #     terminated, new_lines_removed, new_height, new_holes, observation = self.get_tetris_server_response()
+
+    #     # --- Calculate Reward ---
+    #     reward = 0.0
+    #     lines_cleared_this_step = new_lines_removed - self.lines_removed
+
+    #     # --- !!! NEW: Multi-line clear reward logic !!! ---
+    #     line_clear_reward = 0.0
+    #     if lines_cleared_this_step == 1:
+    #         line_clear_reward = 1.5 * self.reward_line_clear_coeff
+    #     elif lines_cleared_this_step == 2:
+    #         line_clear_reward = 2.2 * self.reward_line_clear_coeff # Quadratic
+    #     elif lines_cleared_this_step == 3:
+    #         line_clear_reward = 3.5 * self.reward_line_clear_coeff
+    #     elif lines_cleared_this_step >= 4:
+    #         line_clear_reward = 5.5 * self.reward_line_clear_coeff # Big bonus for Tetris
+    #     reward += line_clear_reward
+    #     # --- END NEW ---
+
+    #     height_increase = new_height - self.current_height
+    #     height_penalty = 0.0
+    #     if height_increase > 0:
+    #         height_penalty = height_increase * self.penalty_height_increase_coeff
+    #         reward -= height_penalty
+
+    #     hole_increase = new_holes - self.current_holes
+    #     hole_penalty = 0.0
+    #     if hole_increase > 0:
+    #         hole_penalty = hole_increase * self.penalty_hole_increase_coeff
+    #         reward -= hole_penalty
+
+    #     step_penalty = self.penalty_step_coeff # Will be 0 if set above
+    #     reward -= step_penalty # Apply step penalty (even if 0)
+
+    #     if action == 4:           # 硬降
+    #         reward += self.drop_reward_coeff
+    #     if not terminated:        # 存活
+    #         reward += self.survival_reward_coeff
+
+    #     game_over_penalty = 0.0
+    #     if terminated:
+    #         game_over_penalty = self.penalty_game_over_coeff
+    #         lifetime_ratio = self.lifetime / 280
+    #         early_penalty = self.penalty_game_over_coeff * max(0.0, 1.0 - lifetime_ratio) * 0.15
+    #         _,_, col_heights,count_empty = self._compute_board_cost(observation, new_holes, new_height)
+    #         balance_reward = self._calculate_balance_reward(col_heights, new_holes) * 1.5
+    #         reward += balance_reward 
+    #         reward -= (early_penalty + game_over_penalty)
+    #         reward -= (count_empty *10)
+            
+    #         # Log only once per game over for clarity, ADDED reward breakdown
+    #         self.episode_total_reward += reward
+    #         # Log only once per game over for clarity, ADDED reward breakdown
+    #         write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}. "
+    #                   f"LC={line_clear_reward:.2f}, "
+    #                   f"HP={-height_penalty:.2f}, OP={-hole_penalty:.2f}, SP={-step_penalty:.2f}, "
+    #                   f"GO={-game_over_penalty:.2f} -> Total={reward:.2f}")
+    #         write_log(f"🔥 Total Episode Reward: {self.episode_total_reward:.2f}")
+
+    #     _,_, col_heights,count_empty = self._compute_board_cost(observation, new_holes, new_height)
+    #     balance_reward = self._calculate_balance_reward(col_heights, new_holes) * 1.2
+    #     reward -= (count_empty *3)
+    #     reward += balance_reward 
+    #     # --- Update Internal State ---
+    #     self.episode_total_reward += reward
+    #     self.lines_removed = new_lines_removed
+    #     self.current_height = new_height
+    #     self.current_holes = new_holes
+    #     self.lifetime += 1
+
+    #     # --- Prepare Return Values ---
+    #     info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime}
+    #     truncated = False # DQN typically doesn't use truncation like PPO
+
+    #     if terminated:
+    #         info['terminal_observation'] = observation.copy()
+    #         # Log final stats here if needed, or use SB3 logger/callback
+    #         # Example: print(f"Episode End: Lines={self.lines_removed}, Lifetime={self.lifetime}, Reward={reward}")
 
 
-        # --- !!! NEW: Detailed Wandb Logging !!! ---
-        if wandb_enabled and run:
-             try:
-                 log_data = {
-                     "reward/step_total": reward,
-                     "reward/step_line_clear": line_clear_reward,
-                     "reward/step_height_penalty": -height_penalty, # Log penalties as negative values
-                     "reward/step_hole_penalty": -hole_penalty,
-                     "reward/step_survival_penalty": -step_penalty,
-                     "reward/step_game_over_penalty": -game_over_penalty, # Will be non-zero only on last step
-                     "env/lines_cleared_this_step": lines_cleared_this_step,
-                     "env/height_increase": height_increase,
-                     "env/hole_increase": hole_increase,
-                     "env/current_height": self.current_height,
-                     "env/current_holes": self.current_holes,
-                     "env/current_lifetime": self.lifetime # Log lifetime at each step
-                 }
-                 # Filter out zero reward components (except game over) for cleaner graphs
-                 # Keep all env/ metrics
-                 filtered_log_data = {k: v for k, v in log_data.items() if not (k.startswith("reward/") and not k.endswith("game_over_penalty") and v == 0) or k.startswith("env/")}
-                 # We don't have easy access to the global step here, rely on Wandb/SB3 sync
-                 wandb.log(filtered_log_data)
-             except Exception as log_e:
-                 # Prevent spamming logs if Wandb logging fails repeatedly
-                 if not self._wandb_log_error_reported:
-                     print(f"Wandb logging error in step: {log_e}")
-                     self._wandb_log_error_reported = True
-        # --- END NEW ---
+    #     # --- !!! NEW: Detailed Wandb Logging !!! ---
+    #     if wandb_enabled and run:
+    #          try:
+    #              log_data = {
+    #                  "reward/step_total": reward,
+    #                  "reward/step_line_clear": line_clear_reward,
+    #                  "reward/step_height_penalty": -height_penalty, # Log penalties as negative values
+    #                  "reward/step_hole_penalty": -hole_penalty,
+    #                  "reward/step_survival_penalty": -step_penalty,
+    #                  "reward/step_game_over_penalty": -game_over_penalty, # Will be non-zero only on last step
+    #                  "env/lines_cleared_this_step": lines_cleared_this_step,
+    #                  "env/height_increase": height_increase,
+    #                  "env/hole_increase": hole_increase,
+    #                  "env/current_height": self.current_height,
+    #                  "env/current_holes": self.current_holes,
+    #                  "env/current_lifetime": self.lifetime # Log lifetime at each step
+    #              }
+    #              # Filter out zero reward components (except game over) for cleaner graphs
+    #              # Keep all env/ metrics
+    #              filtered_log_data = {k: v for k, v in log_data.items() if not (k.startswith("reward/") and not k.endswith("game_over_penalty") and v == 0) or k.startswith("env/")}
+    #              # We don't have easy access to the global step here, rely on Wandb/SB3 sync
+    #              wandb.log(filtered_log_data)
+    #          except Exception as log_e:
+    #              # Prevent spamming logs if Wandb logging fails repeatedly
+    #              if not self._wandb_log_error_reported:
+    #                  print(f"Wandb logging error in step: {log_e}")
+    #                  self._wandb_log_error_reported = True
+    #     # --- END NEW ---
 
 
-        # Optional: Render on step if requested
-        if self.render_mode == "human":
-              self.render()
+    #     # Optional: Render on step if requested
+    #     if self.render_mode == "human":
+    #           self.render()
 
-        return observation, reward, terminated, truncated, info
+    #     return observation, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.total_lines_this_episode = 0
         self.episode_total_reward = 0.0
         # Reset the Wandb error reported flag for the new episode
         self._wandb_log_error_reported = False
@@ -675,7 +749,7 @@ write_log("✅ 包裝環境 (VecNormalize - Rewards Only)...")
 # Wrap with VecNormalize, NORMALIZING REWARDS ONLY.
 # Use wandb config if available, otherwise use default from global config
 gamma_param = run.config.get("gamma", config["gamma"]) if run else config["gamma"]
-train_env = VecNormalize(train_env_stacked, norm_obs=False, norm_reward=True, gamma=gamma_param)
+train_env = VecNormalize(train_env_stacked, norm_obs=True, norm_reward=False, gamma=gamma_param)
 
 write_log("   環境建立完成並已包裝 (DummyVecEnv -> VecFrameStack -> VecNormalize)")
 
@@ -691,12 +765,12 @@ policy_type = current_config.get("policy_type", "CnnPolicy")
 learning_rate = current_config.get("learning_rate", 1e-4)
 buffer_size = current_config.get("buffer_size", 100000)
 learning_starts = current_config.get("learning_starts", 10000)
-batch_size = current_config.get("batch_size", 32)
+batch_size = current_config.get("batch_size",64)
 tau = 1.0 # Default for DQN
 target_update_interval = current_config.get("target_update_interval", 10000)
 gradient_steps = 1 # Default for DQN
 # --- !!! UPDATED Exploration Fraction used here !!! ---
-exploration_fraction = current_config.get("exploration_fraction", 0.5) # INCREASED default if not in wandb
+exploration_fraction = current_config.get("exploration_fraction", 0.3) # INCREASED default if not in wandb
 exploration_final_eps = current_config.get("exploration_final_eps", 0.05)
 
 # Define DQN model
@@ -710,7 +784,7 @@ model = DQN(
     learning_starts=learning_starts,
     batch_size=batch_size,
     tau=tau,
-    train_freq=(1, "step"), # Train every step
+    train_freq=(4, "step"), # Train every step
     gradient_steps=gradient_steps,
     target_update_interval=target_update_interval,
     exploration_fraction=exploration_fraction, # Use the updated value
@@ -767,7 +841,7 @@ if training_successful:
     final_model_path = os.path.join("/kaggle/working", final_model_name)
 
     try:
-        train_env.save(stats_path)
+        train_env.save("vecnormalize_stats.pkl")
         write_log(f"   VecNormalize 統計數據已儲存至 {stats_path}")
         if wandb_enabled and run: wandb.save(stats_path) # Upload stats to wandb
 
@@ -795,10 +869,12 @@ if training_successful:
         n_stack_eval = run.config.get("n_stack", config["n_stack"]) if run else config["n_stack"]
         eval_env_stacked = VecFrameStack(eval_env_base, n_stack=n_stack_eval, channels_order="first")
 
-        # Load the SAME VecNormalize statistics
-        eval_env = VecNormalize.load(stats_path, eval_env_stacked)
+        # Load the SAME VecNormalize statistics train_env = VecNormalize(train_env_stacked, norm_obs=True, norm_reward=False, gamma=gamma_param)
+        eval_env = VecNormalize.load("vecnormalize_stats.pkl", eval_env_stacked)
+        # eval_env = VecNormalize.load(stats_path, eval_env_stacked,norm_obs=True, norm_reward=False)
         eval_env.training = False  # Set mode to evaluation
         eval_env.norm_reward = False # IMPORTANT: দেখতে আসল reward (View actual rewards)
+        eval_env.norm_obs = True
 
         write_log("   評估環境建立成功.")
 
