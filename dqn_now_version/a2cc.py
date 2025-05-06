@@ -30,8 +30,11 @@ class TetrisEnv(gym.Env):
 
         self.action_space = spaces.Discrete(self.N_DISCRETE_ACTIONS)
         # Example for using image as input (channel-first; channel-last also works):
-        self.observation_space = spaces.Box(low=0, high=255,
-                                            shape=(self.IMG_HEIGHT, self.IMG_WIDTH, self.IMG_CHANNELS), dtype=np.uint8)
+        self.observation_space = spaces.Box(
+            low=0, high=255,
+            shape=(1, 84, 84),
+            dtype=np.uint8
+        )
         self.server_ip = host_ip
         self.server_port = host_port
 
@@ -59,14 +62,14 @@ class TetrisEnv(gym.Env):
 
         # Negative height reward
         if height > self.height:
-            reward -= (height - self.height)*5
+            reward -= (height - self.height)*8
 
         # Positive hole reduction reward
         if holes < self.holes:
-            reward += (self.holes - holes)*10
+            reward += (self.holes - holes)*15
 
         if lines > self.lines_removed:
-            reward = reward + (lines - self.lines_removed)*1000
+            reward = reward + (lines - self.lines_removed)*1200
             self.lines_removed = lines
 
         self.holes = holes
@@ -112,10 +115,19 @@ class TetrisEnv(gym.Env):
         img_size = int.from_bytes(sock.recv(4), 'big')
         img_png = sock.recv(img_size)
 
+        # 解碼 PNG 並轉換成 (1, 84, 84) 格式
         nparr = np.frombuffer(img_png, np.uint8)
-        np_image = cv2.imdecode(nparr, -1)
+        np_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if np_image is None:
+            return True, removed_lines, height, holes, np.zeros((1, 84, 84), dtype=np.uint8)
 
-        return is_game_over, removed_lines, height, holes, np_image
+        resized = cv2.resize(np_image, (84, 84))
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+        observation = np.expand_dims(stretched, axis=0).astype(np.uint8)  # shape: (1, 84, 84)
+
+        return is_game_over, removed_lines, height, holes, observation
+
     
 from stable_baselines3.common.env_checker import check_env
 
@@ -140,8 +152,77 @@ from stable_baselines3 import PPO, A2C, DQN
 from stable_baselines3.common.env_util import make_vec_env
 # Let's try A2C by creating 30 environments
 vec_env = make_vec_env(TetrisEnv, n_envs=40, seed=123456789)
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+import torch.nn as nn
+import torch
+
+from stable_baselines3.dqn.policies import DQNPolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from torch import nn
+import torch
+from stable_baselines3.common.torch_layers import NatureCNN
+
+class TetrisNatureCNN(NatureCNN):
+    """
+    在 Nature-CNN 基礎上：
+      1. 把 Conv2 的 kernel 從 4×4 -> 5×5，stride 2 (cover 高度梯度)
+      2. Conv3 改成 dilation=2，感受野拉大
+      3. 加一個 SE attention (channel-wise) 強化關鍵特徵
+    """
+
+    def __init__(self, observation_space, features_dim: int = 512):
+        super().__init__(observation_space, features_dim)  # ← 先建原始 layers
+
+        # ----- 修改 Conv2 -----
+        self.cnn[2] = nn.Conv2d(32, 64, kernel_size=5, stride=2)   # index 2 = Conv2
+
+        # ----- 修改 Conv3 (dilated) -----
+        # Nature 原 index 4: nn.Conv2d(64, 64, 3, 1)
+        self.cnn[4] = nn.Conv2d(64, 64, kernel_size=3, stride=1,
+                                padding=2, dilation=2, bias=False)
+
+        # ----- 在 Conv3 後插入 SE Block -----
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),          # (N,64,1,1)
+            nn.Flatten(),
+            nn.Linear(64, 16), nn.SiLU(),
+            nn.Linear(16, 64), nn.Sigmoid()
+        )
+
+        # 重新計算 flatten size
+        with torch.no_grad():
+            sample = torch.zeros(1, *observation_space.shape)
+            n_flatten = self.forward_cnn(sample).shape[1]
+
+        # 重建線性層，保持 features_dim
+        self.linear = nn.Sequential(
+            nn.Linear(n_flatten, features_dim),
+            nn.SiLU()
+        )
+
+    # --------- 只覆寫 CNN 前向，線性層沿用父類 ---------
+    def forward_cnn(self, x):
+        for i, layer in enumerate(self.cnn):
+            x = layer(x)
+            if i == 4:          # Conv3 之後做 SE
+                w = self.se(x).view(x.size(0), -1, 1, 1)
+                x = x * w
+            if isinstance(layer, nn.ReLU):
+                x = nn.SiLU()(x)    # 統一換成 SiLU
+        return x
+
+
+import torch.nn as nn
+from stable_baselines3.dqn.policies import DQNPolicy
+from stable_baselines3.common.torch_layers import NatureCNN
+
+
+policy_kwargs = dict(
+    features_extractor_class = TetrisNatureCNN,
+    features_extractor_kwargs = dict(features_dim=256),
+)
 # Train the agent
-model = A2C("CnnPolicy", vec_env, verbose=1, tensorboard_log="./sb3_log/",learning_rate=4e-4,n_steps=16,gae_lambda=0.95,gamma=0.97,ent_coef=0.006,vf_coef=0.7,normalize_advantage=True,max_grad_norm=0.7).learn(2800000)
+model = A2C("CnnPolicy", vec_env, verbose=1, tensorboard_log="./sb3_log/",learning_rate=6e-4,n_steps=12,gae_lambda=0.91,gamma=0.97,ent_coef=0.009,policy_kwargs=policy_kwargs, vf_coef=0.8,normalize_advantage=True).learn(2800000)
 # model = PPO("CnnPolicy", vec_env, verbose=1, tensorboard_log="./sb3_log/",learning_rate=3e-4,n_steps=12,gae_lambda=0.97,gamma=0.97,ent_coef=0.008,vf_coef=0.6,normalize_advantage=True,max_grad_norm=0.4).learn(1500000)
 
 import os

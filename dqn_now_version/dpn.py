@@ -14,6 +14,7 @@ from gymnasium import spaces
 from stable_baselines3 import DQN
 # from stable_baselines3.common.env_util import make_vec_env # Not used
 from stable_baselines3.common.vec_env import VecNormalize, VecFrameStack, DummyVecEnv
+from stable_baselines3.common.vec_env import VecMonitor
 # from stable_baselines3.common.callbacks import BaseCallback # Replaced by WandbCallback
 import torch
 import time
@@ -30,7 +31,7 @@ from wandb.integration.sb3 import WandbCallback
 # Set your student ID here for filenames
 STUDENT_ID = "113598065"
 # Set total training steps
-TOTAL_TIMESTEPS = 3500000 # Adjust as needed (e.g., 1M, 2M, 5M)
+TOTAL_TIMESTEPS = 5500000 # Adjust as needed (e.g., 1M, 2M, 5M)
 
 
 # --- Wandb Login and Initialization ---
@@ -46,27 +47,10 @@ except Exception as e:
 # Start a wandb run if enabled
 # --- !!! MODIFY HYPERPARAMETERS HERE for Wandb logging if needed !!! ---
 config = { # Log hyperparameters
-    "policy_type": "CnnPolicy",
     "total_timesteps": TOTAL_TIMESTEPS,
     "env_id": "TetrisEnv-v1",
     "gamma": 0.995,
-    "learning_rate": 1e-4,
-    "buffer_size": 200000,
-    "learning_starts": 10000,
-    "train_freq":4,
-    "target_update_interval": 5000,
-    "exploration_fraction": 0.28, # <<< INCREASED exploration duration
-    "exploration_initial_eps":  0.9,
-    "exploration_final_eps": 0.15,#Kept final exploration rate
-    "batch_size": 64,
     "n_stack": 4,
-    "student_id": STUDENT_ID,
-    # --- NEW: Add reward coeffs to config for tracking ---
-    "reward_line_clear_coeff": 110.0, # Example value, match below
-    "penalty_height_increase_coeff": 3, # Example value, match below
-    "penalty_hole_increase_coeff": 2.5, # Example value, match below
-    "penalty_step_coeff": 0.05, # Example value, match below
-    "penalty_game_over_coeff": 280.0 # Example value, match below
 }
 
 if wandb_enabled:
@@ -318,9 +302,9 @@ class TetrisEnv(gym.Env):
             stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
             observation = np.expand_dims(stretched, axis=0).astype(np.uint8)
             save_dir = "gray_images"
-            os.makedirs(save_dir, exist_ok=True)
+            # os.makedirs(save_dir, exist_ok=True)
             save_path = os.path.join(save_dir, f"gray_tmp.png")
-            cv2.imwrite(os.path.join(save_dir, "gray_tmp.png"), stretched)
+            # cv2.imwrite(os.path.join(save_dir, "gray_tmp.png"), stretched)
 
             # Store frames for rendering/observation
             self.last_raw_render_frame = resized.copy() # Store BGR for render
@@ -336,65 +320,7 @@ class TetrisEnv(gym.Env):
             write_log(f"❌ Unexpected error getting server response: {e}. Ending episode.")
             # Return last known state and signal termination
             return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
-    
-    def _calculate_balance_reward(self, col_heights, holes):
-        """
-        計算方塊堆積的平衡程度和空洞數量。
-        標準差越小（平衡）且空洞越少，獎勵越高。
-        """
-        balance_std = np.std(col_heights)
-        
-        # 平衡獎勵（標準差越低獎勵越高）
-        balance_reward = max(10, 27 - balance_std * 3)
 
-        # 空洞懲罰（空洞越多懲罰越重）
-        hole_penalty = holes * 2  # 每個空洞扣50點獎勵，可自行調整
-        bumpiness = np.sum(np.abs(np.diff(col_heights)))
-        # 綜合獎勵：平衡獎勵減去空洞懲罰（確保非負）
-        total_balance_reward = max(0, balance_reward - hole_penalty - 3*bumpiness)
-
-        return total_balance_reward
-
-    def _compute_board_cost(self, observation, holes,max_h):
-        """
-        由灰階 observation 推估 10 列高度，計算
-        cost = a*holes + b*bumpiness + c*aggregateHeight
-        ※ 以『越小越好』的 cost 形式回傳
-        """
-        # 將 (1,84,84) → (84,84) 並二值化
-        img = (observation[0] < 128).astype(np.uint8)  # 1 = 塊，0 = 空
-        img2 = (observation[0] < 128).astype(np.uint8) * 255 
-        grid_w = img.shape[1] // 10                    # 每一列寬度
-        save_dir = "obs_images"
-        os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, f"obs_tmp.png")
-        cv2.imwrite(save_path, img2)
-        # 估 10 列高度
-        col_heights = []
-        bottom_empty_count = 0
-        for i in range(10):
-            start = i * grid_w
-            end = (i + 1) * grid_w if i < 9 else 84  # 最後一欄補到 84，避免落掉最後一列像素
-            col = img[:, start:end]
-            rows = np.where(col.any(axis=1))[0]
-            h = 0 if len(rows) == 0 else (img.shape[0] - rows[0])
-            col_heights.append(h)
-            bottom_row = col[-1, :]  # 最底一列
-            if not bottom_row.any():  # 如果整個底部是空的
-                bottom_empty_count += 1
-
-        bumpiness = sum(abs(np.diff(col_heights)))
-
-        max_h = max(col_heights)
-        min_h = min(col_heights)
-        height_range = max_h - min_h
-        cost = (self.eval_a * holes +
-                self.eval_b * bumpiness * 1.5 +
-                self.eval_c * max_h+
-                10 * height_range)
-        cost = cost * -0.02
-        return cost , max_h,col_heights , bottom_empty_count
-    
     def step(self, action):
         # 1. 送指令
         command_map = {
@@ -417,27 +343,33 @@ class TetrisEnv(gym.Env):
         terminated, new_lines, new_h, new_holes, obs = self.get_tetris_server_response()
         lines_cleared = new_lines - self.lines_removed
         self.total_lines_this_episode += lines_cleared
-        # 2. ── 簡化版 Reward ──────────────────────────────
         reward = 0.0
 
-        # (a) 清線：平方給獎，鼓勵一口氣消多行
-        lines_cleared = new_lines - self.lines_removed
-        reward += 10 * (lines_cleared ** 2)
-
-        # (b) 空洞 + 堆高：一次性度量 → 懲罰
-        reward -= 0.1 * (new_holes + new_h)
+        # (a) drop 獎勵：鼓勵主動落下
         if action == 4:
-            reward += 1.5
-        # (c) 生存：只要還活著就給小獎
-        if not terminated:
-            reward += 0.1
-        else:
-            # 結束時再扣一點固定罰
-            reward -= 80
+            reward += 4.0  # 輕微鼓勵 drop 行為
 
-        if new_holes < self.current_holes:
-            reward += (self.current_holes - new_holes) * 1.0
-        # ───────────────────────────────────────────────
+        # (b) 清線獎勵：每清一行 +1000
+        lines_cleared = new_lines - self.lines_removed
+        if lines_cleared > 0:
+            reward += 1000 * lines_cleared
+
+        # (c) 高度變化懲罰（只懲罰上升）
+        if new_h > self.current_height:
+            reward -= (new_h - self.current_height) * 5.5
+
+        # (d) 洞數變化懲罰 / 獎勵
+        delta_holes = new_holes - self.current_holes
+        # if delta_holes > 0:
+        #     reward -= delta_holes * 2.0  # 增加洞 => 懲罰
+        if delta_holes < 0:
+            reward += (-delta_holes) * 3.0  # 減少洞 => 獎勵
+
+        # (e) 存活獎勵：活著就給一點點
+        if not terminated:
+            reward += 0.05
+        else:
+            reward -= 100.0  # 終局懲罰
         self.lines_removed = new_lines
         if terminated:
             write_log(f"🔥 Total Episode Reward: {self.episode_total_reward:.2f}")
@@ -452,173 +384,8 @@ class TetrisEnv(gym.Env):
         self.episode_total_reward += reward
 
         info = {'removed_lines': new_lines, 'lifetime': self.lifetime}
+        # normalized_reward = (reward - self.reward_running_mean) / (np.sqrt(self.reward_running_var) + 1e-8)
         return obs, reward, terminated, False, info
-
-    # def step(self, action):
-    #     # --- Send Action ---
-    #     command_map = {
-    #         0: b"move -1\n", 1: b"move 1\n",
-    #         2: b"rotate 0\n", 3: b"rotate 1\n",
-    #         4: b"drop\n"
-    #     }
-    #     command = command_map.get(action)
-    #     if command is None:
-    #         write_log(f"⚠️ Invalid action received: {action}. Sending 'drop'.")
-    #         command = b"drop\n"
-    #     # write_log(f"{self._log_prefix} Step {self.lifetime + 1}: Chosen Action={act_val}, Command={command.strip()}")
-    #     # write_log(f"Step {self.lifetime + 1}: Chosen Action={action}, Command={command.strip()}")
-    #     try:
-    #         self._send_command(command)
-    #     except (ConnectionAbortedError, ConnectionError) as e:
-    #         write_log(f"❌ Ending episode due to send failure in step: {e}")
-    #         terminated = True
-    #         observation = self.last_observation.copy()
-    #         reward = self.penalty_game_over_coeff * -1 # Apply game over penalty directly
-    #         info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime, 'final_status': 'send_error'}
-    #         info['terminal_observation'] = observation # Add terminal observation
-
-    #         # --- Log detailed rewards on send failure termination ---
-    #         if wandb_enabled and run:
-    #             try:
-    #                 log_data = {
-    #                      "reward/step_total": reward,
-    #                      "reward/step_line_clear": 0.0,
-    #                      "reward/step_height_penalty": 0.0,
-    #                      "reward/step_hole_penalty": 0.0,
-    #                      "reward/step_survival_penalty": 0.0,
-    #                      "reward/step_game_over_penalty": -self.penalty_game_over_coeff, # Log the penalty
-    #                      "env/lines_cleared_this_step": 0,
-    #                      "env/height_increase": 0,
-    #                      "env/hole_increase": 0,
-    #                      "env/current_height": self.current_height,
-    #                      "env/current_holes": self.current_holes,
-    #                      "env/current_lifetime": self.lifetime
-    #                 }
-    #                 wandb.log(log_data) # Log immediately
-    #             except Exception as log_e:
-    #                  if not self._wandb_log_error_reported:
-    #                      print(f"Wandb logging error in step (send fail): {log_e}")
-    #                      self._wandb_log_error_reported = True
-    #         # --- End logging ---
-
-    #         return observation, reward, terminated, False, info # Return immediately
-
-    #     # --- Get State Update ---
-    #     terminated, new_lines_removed, new_height, new_holes, observation = self.get_tetris_server_response()
-
-    #     # --- Calculate Reward ---
-    #     reward = 0.0
-    #     lines_cleared_this_step = new_lines_removed - self.lines_removed
-
-    #     # --- !!! NEW: Multi-line clear reward logic !!! ---
-    #     line_clear_reward = 0.0
-    #     if lines_cleared_this_step == 1:
-    #         line_clear_reward = 1.5 * self.reward_line_clear_coeff
-    #     elif lines_cleared_this_step == 2:
-    #         line_clear_reward = 2.2 * self.reward_line_clear_coeff # Quadratic
-    #     elif lines_cleared_this_step == 3:
-    #         line_clear_reward = 3.5 * self.reward_line_clear_coeff
-    #     elif lines_cleared_this_step >= 4:
-    #         line_clear_reward = 5.5 * self.reward_line_clear_coeff # Big bonus for Tetris
-    #     reward += line_clear_reward
-    #     # --- END NEW ---
-
-    #     height_increase = new_height - self.current_height
-    #     height_penalty = 0.0
-    #     if height_increase > 0:
-    #         height_penalty = height_increase * self.penalty_height_increase_coeff
-    #         reward -= height_penalty
-
-    #     hole_increase = new_holes - self.current_holes
-    #     hole_penalty = 0.0
-    #     if hole_increase > 0:
-    #         hole_penalty = hole_increase * self.penalty_hole_increase_coeff
-    #         reward -= hole_penalty
-
-    #     step_penalty = self.penalty_step_coeff # Will be 0 if set above
-    #     reward -= step_penalty # Apply step penalty (even if 0)
-
-    #     if action == 4:           # 硬降
-    #         reward += self.drop_reward_coeff
-    #     if not terminated:        # 存活
-    #         reward += self.survival_reward_coeff
-
-    #     game_over_penalty = 0.0
-    #     if terminated:
-    #         game_over_penalty = self.penalty_game_over_coeff
-    #         lifetime_ratio = self.lifetime / 280
-    #         early_penalty = self.penalty_game_over_coeff * max(0.0, 1.0 - lifetime_ratio) * 0.15
-    #         _,_, col_heights,count_empty = self._compute_board_cost(observation, new_holes, new_height)
-    #         balance_reward = self._calculate_balance_reward(col_heights, new_holes) * 1.5
-    #         reward += balance_reward 
-    #         reward -= (early_penalty + game_over_penalty)
-    #         reward -= (count_empty *10)
-            
-    #         # Log only once per game over for clarity, ADDED reward breakdown
-    #         self.episode_total_reward += reward
-    #         # Log only once per game over for clarity, ADDED reward breakdown
-    #         write_log(f"💔 Game Over! Final Lines: {new_lines_removed}, Lifetime: {self.lifetime + 1}. "
-    #                   f"LC={line_clear_reward:.2f}, "
-    #                   f"HP={-height_penalty:.2f}, OP={-hole_penalty:.2f}, SP={-step_penalty:.2f}, "
-    #                   f"GO={-game_over_penalty:.2f} -> Total={reward:.2f}")
-    #         write_log(f"🔥 Total Episode Reward: {self.episode_total_reward:.2f}")
-
-    #     _,_, col_heights,count_empty = self._compute_board_cost(observation, new_holes, new_height)
-    #     balance_reward = self._calculate_balance_reward(col_heights, new_holes) * 1.2
-    #     reward -= (count_empty *3)
-    #     reward += balance_reward 
-    #     # --- Update Internal State ---
-    #     self.episode_total_reward += reward
-    #     self.lines_removed = new_lines_removed
-    #     self.current_height = new_height
-    #     self.current_holes = new_holes
-    #     self.lifetime += 1
-
-    #     # --- Prepare Return Values ---
-    #     info = {'removed_lines': self.lines_removed, 'lifetime': self.lifetime}
-    #     truncated = False # DQN typically doesn't use truncation like PPO
-
-    #     if terminated:
-    #         info['terminal_observation'] = observation.copy()
-    #         # Log final stats here if needed, or use SB3 logger/callback
-    #         # Example: print(f"Episode End: Lines={self.lines_removed}, Lifetime={self.lifetime}, Reward={reward}")
-
-
-    #     # --- !!! NEW: Detailed Wandb Logging !!! ---
-    #     if wandb_enabled and run:
-    #          try:
-    #              log_data = {
-    #                  "reward/step_total": reward,
-    #                  "reward/step_line_clear": line_clear_reward,
-    #                  "reward/step_height_penalty": -height_penalty, # Log penalties as negative values
-    #                  "reward/step_hole_penalty": -hole_penalty,
-    #                  "reward/step_survival_penalty": -step_penalty,
-    #                  "reward/step_game_over_penalty": -game_over_penalty, # Will be non-zero only on last step
-    #                  "env/lines_cleared_this_step": lines_cleared_this_step,
-    #                  "env/height_increase": height_increase,
-    #                  "env/hole_increase": hole_increase,
-    #                  "env/current_height": self.current_height,
-    #                  "env/current_holes": self.current_holes,
-    #                  "env/current_lifetime": self.lifetime # Log lifetime at each step
-    #              }
-    #              # Filter out zero reward components (except game over) for cleaner graphs
-    #              # Keep all env/ metrics
-    #              filtered_log_data = {k: v for k, v in log_data.items() if not (k.startswith("reward/") and not k.endswith("game_over_penalty") and v == 0) or k.startswith("env/")}
-    #              # We don't have easy access to the global step here, rely on Wandb/SB3 sync
-    #              wandb.log(filtered_log_data)
-    #          except Exception as log_e:
-    #              # Prevent spamming logs if Wandb logging fails repeatedly
-    #              if not self._wandb_log_error_reported:
-    #                  print(f"Wandb logging error in step: {log_e}")
-    #                  self._wandb_log_error_reported = True
-    #     # --- END NEW ---
-
-
-    #     # Optional: Render on step if requested
-    #     if self.render_mode == "human":
-    #           self.render()
-
-    #     return observation, reward, terminated, truncated, info
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -730,70 +497,114 @@ class TetrisEnv(gym.Env):
 
 # --- Environment Setup ---
 write_log("✅ 建立基礎環境函數 make_env...")
-def make_env():
-    """Helper function to create an instance of the Tetris environment."""
-    env = TetrisEnv()
-    return env
-
-write_log("✅ 建立向量化環境 (DummyVecEnv)...")
-# Use DummyVecEnv for single environment interaction
-train_env_base = DummyVecEnv([make_env])
-
-write_log("✅ 包裝環境 (VecFrameStack)...")
-# Wrap with VecFrameStack (channel-first is important)
-# Use wandb config if available, otherwise use default from global config
-n_stack = run.config.get("n_stack", config["n_stack"]) if run else config["n_stack"]
-train_env_stacked = VecFrameStack(train_env_base, n_stack=n_stack, channels_order="first")
-
-write_log("✅ 包裝環境 (VecNormalize - Rewards Only)...")
-# Wrap with VecNormalize, NORMALIZING REWARDS ONLY.
-# Use wandb config if available, otherwise use default from global config
-gamma_param = run.config.get("gamma", config["gamma"]) if run else config["gamma"]
-train_env = VecNormalize(train_env_stacked, norm_obs=True, norm_reward=False, gamma=gamma_param)
-
-write_log("   環境建立完成並已包裝 (DummyVecEnv -> VecFrameStack -> VecNormalize)")
-
-
 # ----------------------------
 # DQN Model Setup and Training
 # ----------------------------
 write_log("🧠 設定 DQN 模型...")
-# Use wandb config for hyperparameters if available, otherwise use defaults from global config dict
-current_config = run.config if run else config # Use global config if no run active
+from stable_baselines3.common.env_util import make_vec_env
+# Let's try A2C by creating 30 environments
+train_env = make_vec_env(TetrisEnv, n_envs=40, seed=123456789)
+train_env = VecNormalize(train_env, norm_reward = True,norm_obs=False)
+print(train_env.num_envs)
+# # Define DQN model
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+import torch.nn as nn
+import torch
 
-policy_type = current_config.get("policy_type", "CnnPolicy")
-learning_rate = current_config.get("learning_rate", 1e-4)
-buffer_size = current_config.get("buffer_size", 100000)
-learning_starts = current_config.get("learning_starts", 10000)
-batch_size = current_config.get("batch_size",64)
-tau = 1.0 # Default for DQN
-target_update_interval = current_config.get("target_update_interval", 10000)
-gradient_steps = 1 # Default for DQN
-# --- !!! UPDATED Exploration Fraction used here !!! ---
-exploration_fraction = current_config.get("exploration_fraction", 0.3) # INCREASED default if not in wandb
-exploration_final_eps = current_config.get("exploration_final_eps", 0.05)
+from stable_baselines3.dqn.policies import DQNPolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from torch import nn
+import torch
+from stable_baselines3.common.torch_layers import NatureCNN
 
-# Define DQN model
+class TetrisNatureCNN(NatureCNN):
+    """
+    在 Nature-CNN 基礎上：
+      1. 把 Conv2 的 kernel 從 4×4 -> 5×5，stride 2 (cover 高度梯度)
+      2. Conv3 改成 dilation=2，感受野拉大
+      3. 加一個 SE attention (channel-wise) 強化關鍵特徵
+    """
+
+    def __init__(self, observation_space, features_dim: int = 512):
+        super().__init__(observation_space, features_dim)  # ← 先建原始 layers
+
+        # ----- 修改 Conv2 -----
+        self.cnn[2] = nn.Conv2d(32, 64, kernel_size=7, stride=2)   # index 2 = Conv2
+
+        # ----- 修改 Conv3 (dilated) -----
+        # Nature 原 index 4: nn.Conv2d(64, 64, 3, 1)
+        self.cnn[4] = nn.Conv2d(64, 64, kernel_size=5, stride=1,
+                                padding=2, dilation=2, bias=False)
+        self.res_block = nn.Sequential(
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        )
+        # ----- 在 Conv3 後插入 SE Block -----
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),          # (N,64,1,1)
+            nn.Flatten(),
+            nn.Linear(64, 16), nn.SiLU(),
+            nn.Linear(16, 64), nn.Sigmoid()
+        )
+
+        # 重新計算 flatten size
+        with torch.no_grad():
+            sample = torch.zeros(1, *observation_space.shape)
+            n_flatten = self.forward_cnn(sample).shape[1]
+        
+        # 重建線性層，保持 features_dim
+        self.linear = nn.Sequential(
+            nn.Linear(n_flatten, features_dim),
+            nn.SiLU()
+        )
+
+    # --------- 只覆寫 CNN 前向，線性層沿用父類 ---------
+    def forward_cnn(self, x):
+        for i, layer in enumerate(self.cnn):
+            if isinstance(layer, nn.ReLU):
+                # 替換掉 ReLU 成 SiLU
+                x = nn.SiLU()(x)
+            else:
+                x = layer(x)
+            if i == 4:
+                x = x + self.res_block(x)
+                w = self.se(x).view(x.size(0), -1, 1, 1)
+                x = x * w
+        return x
+
+
+import torch.nn as nn
+from stable_baselines3.dqn.policies import DQNPolicy
+from stable_baselines3.common.torch_layers import NatureCNN
+
+
+policy_kwargs = dict(
+    features_extractor_class = TetrisNatureCNN,
+    features_extractor_kwargs = dict(features_dim=256),
+)
+
 model = DQN(
-    policy=policy_type,
+    policy="CnnPolicy",
     env=train_env,
     verbose=1,
-    gamma=gamma_param, # Use loaded gamma
-    learning_rate=learning_rate,
-    buffer_size=buffer_size,
-    learning_starts=learning_starts,
-    batch_size=batch_size,
-    tau=tau,
-    train_freq=(4, "step"), # Train every step
-    gradient_steps=gradient_steps,
-    target_update_interval=target_update_interval,
-    exploration_fraction=exploration_fraction, # Use the updated value
-    exploration_final_eps=exploration_final_eps,
-    policy_kwargs=dict(normalize_images=False), # As per original code
+    gamma=0.97, # Use loaded gamma
+    learning_rate = 4e-4,
+    buffer_size=300000,
+    learning_starts=7000,
+    batch_size=64,
+    tau=1,
+    train_freq=(9, "step"), # Train every step
+    gradient_steps=2,
+    target_update_interval=5000,
+    exploration_fraction = 0.32, # Use the updated value
+    exploration_final_eps=0.08,
+    policy_kwargs=policy_kwargs,# As per original code
     seed=42, # Set seed for reproducibility
     device="cuda" if torch.cuda.is_available() else "cpu",
     tensorboard_log=f"/kaggle/working/runs/{run_id}" if wandb_enabled else None # Log TB only if wandb enabled
 )
+
 write_log(f"   模型建立完成. Device: {model.device}")
 write_log(f"   使用的超參數: {model.get_parameters()['policy']}") # Log actual params used
 
@@ -822,36 +633,9 @@ try:
     )
     write_log("✅ 訓練完成!")
     training_successful = True
+    model.save('113598065_dqn_30env_1M.zip')
 except Exception as e:
-     write_log(f"❌ 訓練過程中發生錯誤: {e}") # Log exception info
-     # Save model before exiting if error occurs mid-training
-     error_save_path = f'/kaggle/working/{STUDENT_ID}_dqn_error_save_{run_id}.zip' # Include run_id
-     try:
-         model.save(error_save_path)
-         write_log(f"   模型已嘗試儲存至 {error_save_path}")
-         if wandb_enabled and run: wandb.save(error_save_path) # Upload error model to wandb
-     except Exception as save_e:
-          write_log(f"   ❌ 儲存錯誤模型時也發生錯誤: {save_e}")
-     if run: run.finish(exit_code=1, quiet=True) # Finish wandb run with error code
-
-# --- Save Final Model (only if training completed successfully) ---
-if training_successful:
-    stats_path = f"/kaggle/working/vecnormalize_stats_{run_id}.pkl"
-    final_model_name = f'{STUDENT_ID}_dqn_final_{run_id}.zip'
-    final_model_path = os.path.join("/kaggle/working", final_model_name)
-
-    try:
-        train_env.save("vecnormalize_stats.pkl")
-        write_log(f"   VecNormalize 統計數據已儲存至 {stats_path}")
-        if wandb_enabled and run: wandb.save(stats_path) # Upload stats to wandb
-
-        model.save(final_model_path)
-        write_log(f"✅ 最終模型已儲存: {final_model_path}")
-        if wandb_enabled and run: wandb.save(final_model_path) # Upload final model to wandb
-
-    except Exception as e:
-        write_log(f"❌ 儲存最終模型或統計數據時出錯: {e}")
-        training_successful = False # Mark as unsuccessful if saving fails
+     write_log(f"❌ 訓練過程中發生錯誤: {e}") # Log exception inf
 
 
 # ----------------------------
@@ -859,179 +643,72 @@ if training_successful:
 # ----------------------------
 if training_successful:
     write_log("\n🧪 開始評估訓練後的模型...")
+    import os
+    import shutil
 
-    # Create a separate evaluation environment
-    try:
-        eval_env_base = DummyVecEnv([make_env])
+    # Test the trained agent
+    # using the vecenv
+    obs = train_env.reset()
+    test_steps = 1000
 
-        # Wrap with FrameStack FIRST, same as training
-        # Use wandb config if available, otherwise use default from global config
-        n_stack_eval = run.config.get("n_stack", config["n_stack"]) if run else config["n_stack"]
-        eval_env_stacked = VecFrameStack(eval_env_base, n_stack=n_stack_eval, channels_order="first")
+    replay_folder = './replay'
+    if os.path.exists(replay_folder):
+        shutil.rmtree(replay_folder)
 
-        # Load the SAME VecNormalize statistics train_env = VecNormalize(train_env_stacked, norm_obs=True, norm_reward=False, gamma=gamma_param)
-        eval_env = VecNormalize.load("vecnormalize_stats.pkl", eval_env_stacked)
-        # eval_env = VecNormalize.load(stats_path, eval_env_stacked,norm_obs=True, norm_reward=False)
-        eval_env.training = False  # Set mode to evaluation
-        eval_env.norm_reward = False # IMPORTANT: দেখতে আসল reward (View actual rewards)
-        eval_env.norm_obs = True
+    n_env = obs.shape[0] # Number of environments. A2C will play all envs
+    ep_id = np.zeros(n_env, int)
+    ep_steps = np.zeros(n_env, int)
+    cum_reward = np.zeros(n_env)
+    max_reward = -1e10
+    max_game_id = 0
+    max_ep_id = 0
+    max_rm_lines = 0
+    max_lifetime = 0
 
-        write_log("   評估環境建立成功.")
+    for step in range(test_steps):
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, info = train_env.step(action)
 
-    except FileNotFoundError:
-        write_log(f"❌ 錯誤: VecNormalize 統計文件未找到於 {stats_path}。跳過評估。")
-        eval_env = None
-    except Exception as e:
-        write_log(f"❌ 建立評估環境時出錯: {e}")
-        eval_env = None
+        if step % 50 == 0:
+            print(f"Step {step}")
+            print("Action: ", action)
+            print("reward=", reward, " done=", done)
 
-    if eval_env is not None:
-        # --- Run Evaluation Episodes ---
-        num_eval_episodes = 5 # Evaluate for 5 episodes
-        total_rewards = []
-        total_lines = []
-        total_lifetimes = []
-        all_frames = [] # For GIF of the first episode
+        for eID in range(n_env):
+            cum_reward[eID] += reward[eID]
+            folder = f'{replay_folder}/{eID}/{ep_id[eID]}'
+            if not os.path.exists(folder):
+                os.makedirs(folder)
+            fname = folder + '/' + '{:06d}'.format(ep_steps[eID]) + '.png'
+            cv2.imwrite(fname, obs[eID])
+            #cv2.imshow("Image" + str(eID), obs[eID])
+            #cv2.waitKey(10)
+            ep_steps[eID] += 1
 
-        try:
-            for i in range(num_eval_episodes):
-                obs = eval_env.reset()
-                done = False
-                episode_reward = 0
-                episode_lines = 0
-                episode_lifetime = 0
-                frames = []
-                last_info = {}
+            if done[eID]:
+                if cum_reward[eID] > max_reward:
+                    max_reward = cum_reward[eID]
+                    max_game_id = eID
+                    max_ep_id = ep_id[eID]
+                    max_rm_lines = info[eID]['removed_lines']
+                    max_lifetime = info[eID]['lifetime']
 
-                while not done:
-                    # Render base env for GIF (only for first episode)
-                    if i == 0:
-                        try:
-                            # Access the underlying TetrisEnv instance
-                            # Note: get_attr might return a list if using SubprocVecEnv, but here DummyVecEnv has one env
-                            base_env = eval_env.get_attr("envs")[0].env
-                            raw_frame = base_env.render(mode="rgb_array")
-                            if raw_frame is not None:
-                                frames.append(raw_frame)
-                        except Exception as render_err:
-                            write_log(f"⚠️ 評估時獲取渲染幀出錯: {render_err}")
-
-                    # Predict and step using the trained model
-                    action, _ = model.predict(obs, deterministic=True) # Use deterministic actions for evaluation
-                    obs, reward, done, infos = eval_env.step(action)
-
-                    # Accumulate rewards and stats (remember reward is not normalized here)
-                    episode_reward += reward[0] # VecEnv returns lists
-                    last_info = infos[0]
-                    # Use .get() for safety, default to previous value if key missing
-                    # Ensure correct keys from TetrisEnv's info dict
-                    episode_lines = last_info.get('removed_lines', episode_lines)
-                    episode_lifetime = last_info.get('lifetime', episode_lifetime)
-                    done = done[0] # VecEnv returns lists
-
-                write_log(f"   評估 Episode {i+1}: Reward={episode_reward:.2f}, Lines={episode_lines}, Steps={episode_lifetime}")
-                total_rewards.append(episode_reward)
-                total_lines.append(episode_lines)
-                total_lifetimes.append(episode_lifetime)
-                if i == 0: all_frames = frames # Store frames from the first episode
-
-            write_log(f"--- 評估結果 ({num_eval_episodes} episodes) ---")
-            mean_reward = np.mean(total_rewards)
-            std_reward = np.std(total_rewards)
-            mean_lines = np.mean(total_lines)
-            std_lines = np.std(total_lines)
-            mean_lifetime = np.mean(total_lifetimes)
-            std_lifetime = np.std(total_lifetimes)
-
-            write_log(f"   平均 Reward: {mean_reward:.2f} +/- {std_reward:.2f}")
-            write_log(f"   平均 Lines: {mean_lines:.2f} +/- {std_lines:.2f}")
-            write_log(f"   平均 Steps: {mean_lifetime:.2f} +/- {std_lifetime:.2f}")
-
-            # Log evaluation metrics to Wandb
-            if wandb_enabled and run:
-                wandb.log({
-                    "eval/mean_reward": mean_reward, "eval/std_reward": std_reward,
-                    "eval/mean_lines": mean_lines, "eval/std_lines": std_lines,
-                    "eval/mean_lifetime": mean_lifetime, "eval/std_lifetime": std_lifetime,
-                })
-
-            # --- Generate Replay GIF ---
-            if all_frames:
-                gif_path = f'/kaggle/working/replay_eval_{run_id}.gif'
-                write_log(f"💾 正在儲存評估回放 GIF 至 {gif_path}...")
-                try:
-                    imageio.mimsave(gif_path, [np.array(frame).astype(np.uint8) for frame in all_frames if frame is not None], fps=15, loop=0)
-                    write_log("   GIF 儲存成功.")
-                    if wandb_enabled and run: wandb.log({"eval/replay": wandb.Video(gif_path, fps=15, format="gif")}) # Log GIF to Wandb
-                except Exception as e: write_log(f"   ❌ 儲存 GIF 時發生錯誤: {e}")
-            else: write_log("   ⚠️ 未能儲存 GIF (沒有收集到幀或第一輪評估出錯).")
-
-            # --- Save Evaluation Results CSV ---
-            csv_filename = f'tetris_evaluation_scores_{run_id}.csv'
-            csv_path = os.path.join("/kaggle/working", csv_filename)
-            try:
-                with open(csv_path, 'w') as fs:
-                    fs.write('episode_id,removed_lines,played_steps,reward\n')
-                    if total_lines: # Ensure lists are not empty before accessing index 0
-                         for i in range(len(total_lines)):
-                             fs.write(f'eval_{i},{total_lines[i]},{total_lifetimes[i]},{total_rewards[i]:.2f}\n')
-                    fs.write(f'eval_avg,{mean_lines:.2f},{mean_lifetime:.2f},{mean_reward:.2f}\n')
-                write_log(f"✅ 評估分數 CSV 已儲存: {csv_path}")
-                if wandb_enabled and run: wandb.save(csv_path) # Upload CSV to wandb
-            except Exception as e: write_log(f"   ❌ 儲存 CSV 時發生錯誤: {e}")
-
-        except Exception as eval_e:
-            write_log(f"❌ 評估迴圈中發生錯誤: {eval_e}", exc_info=True)
-
-        finally:
-             # Ensure evaluation env is closed even if errors occur
-             if eval_env:
-                 eval_env.close()
-                 write_log("   評估環境已關閉.")
-
-# --- Cleanup ---
-write_log("🧹 清理環境...")
-if 'train_env' in locals() and train_env: # Check if train_env exists and is not None
-    try:
-        train_env.close()
-        write_log("   訓練環境已關閉.")
-    except Exception as e:
-        write_log(f"   關閉訓練環境時出錯: {e}")
-
-# Close the Java server process
-if java_process and java_process.poll() is None: # Check if process exists and is running
-     write_log("   正在終止 Java server process...")
-     java_process.terminate()
-     try:
-         java_process.wait(timeout=5) # Wait up to 5 seconds
-         write_log("   Java server process 已終止.")
-     except subprocess.TimeoutExpired:
-         write_log("   Java server 未能在 5 秒內終止, 強制結束...")
-         java_process.kill()
-         write_log("   Java server process 已強制結束.")
-elif java_process and java_process.poll() is not None:
-     write_log("   Java server process 已自行結束.")
-else:
-     write_log("   Java server process 未啟動或已關閉.")
+                ep_id[eID] += 1
+                cum_reward[eID] = 0
+                ep_steps[eID] = 0
+    best_replay_path = f'{replay_folder}/{max_game_id}/{max_ep_id}'
 
 
-# Finish the Wandb run if it was initialized and training didn't crash early
-if run: # Check if run object exists
-    if training_successful:
-         run.finish()
-         write_log("✨ Wandb run finished.")
-    else:
-         # Run might have already been finished in the exception handler
-         # Check run.is_running before finishing again
-         if hasattr(run, 'is_running') and run.is_running:
-             run.finish(exit_code=1) # Ensure it's marked as failed
-             write_log("✨ Wandb run finished (marked as failed due to error).")
-         elif not hasattr(run, 'is_running'): # Fallback for older wandb versions?
-             try: # Try finishing anyway, might raise if already finished
-                 run.finish(exit_code=1)
-                 write_log("✨ Wandb run finished (marked as failed due to error - fallback).")
-             except Exception:
-                 write_log("✨ Wandb run likely already finished (marked as failed due to error).")
+    print("After playing 30 envs each for ", test_steps, " steps:")
+    print(" Max reward=", max_reward, " Best video: " + best_replay_path)
+    print(" Removed lines=", max_rm_lines, " lifetime=", max_lifetime)
+    with open('tetris_best_score_dqn.csv', 'w') as fs:
+        fs.write('id,removed_lines,played_steps\n')
+        fs.write(f'0,{max_rm_lines}, {max_lifetime}\n')
+        fs.write(f'1,{max_rm_lines}, {max_lifetime}\n')
 
+    import glob
+    import imageio
 
-write_log("🏁 腳本執行完畢.")
+    filenames = sorted(glob.glob(best_replay_path + '/*.png'))
+

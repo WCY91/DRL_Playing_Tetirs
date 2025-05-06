@@ -113,6 +113,20 @@ class TetrisEnv(gym.Env):
         img_png = sock.recv(img_size)
 
         nparr = np.frombuffer(img_png, np.uint8)
+        np_image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if np_image is None:
+                 
+         # Return last known state and signal termination
+             return True, self.lines_removed, self.current_height, self.current_holes, self.last_observation.copy()
+
+        resized = cv2.resize(np_image, (self.RESIZED_DIM, self.RESIZED_DIM), interpolation=cv2.INTER_AREA)
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+        save_dir = "gray_images"
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"gray_a2c.png")
+        cv2.imwrite(os.path.join(save_dir, "gray_a2c.png"), stretched)
+        nparr = np.frombuffer(img_png, np.uint8)
         np_image = cv2.imdecode(nparr, -1)
 
         return is_game_over, removed_lines, height, holes, np_image
