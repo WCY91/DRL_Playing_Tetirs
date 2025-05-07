@@ -31,7 +31,7 @@ from wandb.integration.sb3 import WandbCallback
 # Set your student ID here for filenames
 STUDENT_ID = "113598065"
 # Set total training steps
-TOTAL_TIMESTEPS = 5500000 # Adjust as needed (e.g., 1M, 2M, 5M)
+TOTAL_TIMESTEPS = 18500000 # Adjust as needed (e.g., 1M, 2M, 5M)
 
 
 # --- Wandb Login and Initialization ---
@@ -371,10 +371,6 @@ class TetrisEnv(gym.Env):
         else:
             reward -= 100.0  # 終局懲罰
         self.lines_removed = new_lines
-        if terminated:
-            write_log(f"🔥 Total Episode Reward: {self.episode_total_reward:.2f}")
-            write_log(f"💔 Game Over!  本局共清 {self.total_lines_this_episode} 行，"
-                  f"總步數 {self.lifetime}，總獎勵 {self.episode_total_reward:.2f}")
 
         # 3. 更新狀態
         self.lines_removed = new_lines
@@ -382,6 +378,8 @@ class TetrisEnv(gym.Env):
         self.current_holes  = new_holes
         self.lifetime      += 1
         self.episode_total_reward += reward
+        if terminated and self.lines_removed > 0 :
+            write_log(self.lines_removed)
 
         info = {'removed_lines': new_lines, 'lifetime': self.lifetime}
         # normalized_reward = (reward - self.reward_running_mean) / (np.sqrt(self.reward_running_var) + 1e-8)
@@ -527,7 +525,7 @@ class TetrisNatureCNN(NatureCNN):
 
     def __init__(self, observation_space, features_dim: int = 512):
         super().__init__(observation_space, features_dim)  # ← 先建原始 layers
-
+        self.cnn[0] = nn.Conv2d(1, 32, kernel_size=9, stride=4)
         # ----- 修改 Conv2 -----
         self.cnn[2] = nn.Conv2d(32, 64, kernel_size=7, stride=2)   # index 2 = Conv2
 
@@ -589,16 +587,16 @@ model = DQN(
     env=train_env,
     verbose=1,
     gamma=0.97, # Use loaded gamma
-    learning_rate = 4e-4,
-    buffer_size=300000,
-    learning_starts=7000,
-    batch_size=64,
+    learning_rate = 1e-3,
+    buffer_size=1_200_000,
+    learning_starts=185_000,
+    batch_size=128,
     tau=1,
-    train_freq=(9, "step"), # Train every step
-    gradient_steps=2,
-    target_update_interval=5000,
-    exploration_fraction = 0.32, # Use the updated value
-    exploration_final_eps=0.08,
+    train_freq=(12, "step"), # Train every step
+    gradient_steps=6,
+    target_update_interval=14_000,
+    exploration_fraction = 0.35, # Use the updated value
+    exploration_final_eps=0.07,
     policy_kwargs=policy_kwargs,# As per original code
     seed=42, # Set seed for reproducibility
     device="cuda" if torch.cuda.is_available() else "cpu",
