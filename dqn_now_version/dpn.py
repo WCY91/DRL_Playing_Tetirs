@@ -581,22 +581,62 @@ policy_kwargs = dict(
     features_extractor_class = TetrisNatureCNN,
     features_extractor_kwargs = dict(features_dim=256),
 )
+from torch.nn import functional as F
+import torch as th
 
-model = DQN(
+class DoubleDQN(DQN):
+    def train(self, gradient_steps: int, batch_size: int = 256) -> None:
+        self.policy.set_training_mode(True)
+        self._update_learning_rate(self.policy.optimizer)
+        losses = []
+
+        for _ in range(gradient_steps):
+            # Sample from replay buffer
+            replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+
+            with th.no_grad():
+                # Online network selects action
+                next_q_values_online = self.policy.q_net(replay_data.next_observations)
+                next_actions = next_q_values_online.argmax(dim=1, keepdim=True)
+
+                next_q_values_target = self.policy.q_net_target(replay_data.next_observations)
+                next_q_values = next_q_values_target.gather(1, next_actions)
+
+                # Compute TD target
+                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+
+            # Current Q estimate
+            current_q_values = self.q_net(replay_data.observations)
+            current_q_values = th.gather(current_q_values, dim=1, index=replay_data.actions.long())
+
+            # Loss (Huber loss preferred)
+            loss = F.smooth_l1_loss(current_q_values, target_q_values)
+
+            losses.append(loss.item())
+            self.policy.optimizer.zero_grad()
+            loss.backward()
+            th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            self.policy.optimizer.step()
+
+        self._n_updates += gradient_steps
+        self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        self.logger.record("train/loss", np.mean(losses))
+
+model = DoubleDQN(
     policy="CnnPolicy",
     env=train_env,
     verbose=1,
-    gamma=0.97, # Use loaded gamma
+    gamma=0.96, # Use loaded gamma
     learning_rate = 1e-3,
     buffer_size=1_200_000,
     learning_starts=185_000,
-    batch_size=128,
+    batch_size=256,
     tau=1,
-    train_freq=(12, "step"), # Train every step
-    gradient_steps=6,
-    target_update_interval=14_000,
-    exploration_fraction = 0.35, # Use the updated value
-    exploration_final_eps=0.07,
+    train_freq=(4, "step"), # Train every step
+    gradient_steps=7,
+    target_update_interval=19_000,
+    exploration_fraction = 0.2, # Use the updated value
+    exploration_final_eps=0.03,
     policy_kwargs=policy_kwargs,# As per original code
     seed=42, # Set seed for reproducibility
     device="cuda" if torch.cuda.is_available() else "cpu",

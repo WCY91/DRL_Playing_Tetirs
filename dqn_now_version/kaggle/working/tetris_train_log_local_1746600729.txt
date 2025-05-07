@@ -1,52 +1,52 @@
-2025-05-07 12:50:26 - 🚀 嘗試啟動 Java Tetris server...
-2025-05-07 12:50:26 - ✅ Java server process 啟動 (PID: 15592)
-2025-05-07 12:50:26 - ⏳ 等待 Tetris TCP server 啟動中 (127.0.0.1:10612)...
-2025-05-07 12:50:26 - ✅ Java TCP server 準備完成，連線成功
-2025-05-07 12:50:26 - ⚠️ PyTorch is using CPU. Training will be significantly slower.
-2025-05-07 12:50:26 - ✅ 建立基礎環境函數 make_env...
-2025-05-07 12:50:26 - 🧠 設定 DQN 模型...
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:26 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:27 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
-2025-05-07 12:50:29 -    模型建立完成. Device: cpu
-2025-05-07 12:50:29 -    使用的超參數: OrderedDict([('q_net.features_extractor.cnn.0.weight', tensor([[[[ 0.0407, -0.0689,  0.0857,  ...,  0.1001, -0.0016, -0.0840],
+2025-05-07 14:52:09 - 🚀 嘗試啟動 Java Tetris server...
+2025-05-07 14:52:09 - ✅ Java server process 啟動 (PID: 11652)
+2025-05-07 14:52:09 - ⏳ 等待 Tetris TCP server 啟動中 (127.0.0.1:10612)...
+2025-05-07 14:52:10 - ✅ Java TCP server 準備完成，連線成功
+2025-05-07 14:52:10 - ⚠️ PyTorch is using CPU. Training will be significantly slower.
+2025-05-07 14:52:10 - ✅ 建立基礎環境函數 make_env...
+2025-05-07 14:52:10 - 🧠 設定 DQN 模型...
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:10 - TetrisEnv initialized with Reward Coeffs: Line=80.0, H=1.75, O=1.25, Step=0.0, GO=80.0
+2025-05-07 14:52:12 -    模型建立完成. Device: cpu
+2025-05-07 14:52:12 -    使用的超參數: OrderedDict([('q_net.features_extractor.cnn.0.weight', tensor([[[[ 0.0407, -0.0689,  0.0857,  ...,  0.1001, -0.0016, -0.0840],
           [-0.1008, -0.1030, -0.0429,  ...,  0.0756,  0.0093,  0.0368],
           [ 0.0112, -0.0823, -0.0027,  ..., -0.0240,  0.0942,  0.0486],
           ...,
@@ -2647,4 +2647,4 @@
           0.0104,  0.0843, -0.1200, -0.0244, -0.0838, -0.0639,  0.1083, -0.1086,
          -0.0367, -0.1040,  0.0881, -0.0964, -0.0938,  0.1049, -0.0688,  0.0256,
          -0.0387,  0.0592,  0.0101,  0.0671, -0.0939, -0.0828, -0.0252,  0.1220]])), ('q_net_target.q_net.4.bias', tensor([ 0.1150, -0.0719,  0.0423,  0.0445, -0.0153]))])
-2025-05-07 12:50:29 - 🚀 開始訓練 18500000 步...
+2025-05-07 14:52:12 - 🚀 開始訓練 18500000 步...
